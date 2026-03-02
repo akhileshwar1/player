@@ -143,11 +143,14 @@ BufferEvent(Market_event *marketEvent, Market_events_buffer *marketEventsBuffer)
 {
     uint16 currentWriteIndex = marketEventsBuffer->currentWriteIndex;
     uint16 size = marketEventsBuffer->size;
-    if (currentWriteIndex > size)
+    if (currentWriteIndex >= size)
     {
         marketEventsBuffer->currentWriteIndex = currentWriteIndex % size;
     }
     marketEventsBuffer->buffer[marketEventsBuffer->currentWriteIndex] = marketEvent;
+    printf("Buffered event U %u at index %u\n",
+           marketEvent->U,
+           marketEventsBuffer->currentWriteIndex);
     marketEventsBuffer->currentWriteIndex++;
 }
 
