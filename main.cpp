@@ -7,11 +7,13 @@
 #define MARKET_BASE_ENDP "stream.binance.com"
 #define STREAM_PATH "/ws/bnbbtc@depth"
 #define MAX_LEVELS 10
+#define MAX_EVENTS 10 
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
 typedef float real32;
 typedef double real64;
+typedef uint16_t uint16;
 
 typedef struct 
 {
@@ -29,6 +31,15 @@ typedef struct
     quote asks[MAX_LEVELS]; // 10 levels on each side.
     quote bids[MAX_LEVELS];
 } Market_event;
+
+typedef struct
+{
+    uint16 currentWriteIndex;
+    uint16 size;
+    Market_event *buffer[MAX_EVENTS];
+} Market_events_buffer;
+
+Market_events_buffer globalMarketEventsBuffer = {};
 
 uint32
 StringLength(char *str)
@@ -67,7 +78,8 @@ char
     return buffer;
 }
 
-void AddLevelsToEvent(yyjson_val *val, quote quotes[])
+void
+AddLevelsToEvent(yyjson_val *val, quote quotes[])
 {
     size_t idx;
     size_t max;
@@ -101,7 +113,10 @@ void AddLevelsToEvent(yyjson_val *val, quote quotes[])
     }
 }
 
-void LoadMarketEvent(char *input, Market_event *event)
+// TODO(Akhil): Make this handle incomplete inputs that are 
+// later completed.
+void
+LoadMarketEvent(char *input, Market_event *event)
 {
     yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
     yyjson_val *root = yyjson_doc_get_root(doc);
@@ -121,6 +136,19 @@ void LoadMarketEvent(char *input, Market_event *event)
     AddLevelsToEvent(a, event->asks);
     AddLevelsToEvent(b, event->bids);
     yyjson_doc_free(doc);
+}
+
+void
+BufferEvent(Market_event *marketEvent, Market_events_buffer *marketEventsBuffer)
+{
+    uint16 currentWriteIndex = marketEventsBuffer->currentWriteIndex;
+    uint16 size = marketEventsBuffer->size;
+    if (currentWriteIndex > size)
+    {
+        marketEventsBuffer->currentWriteIndex = currentWriteIndex % size;
+    }
+    marketEventsBuffer->buffer[marketEventsBuffer->currentWriteIndex] = marketEvent;
+    marketEventsBuffer->currentWriteIndex++;
 }
 
 int
@@ -148,6 +176,7 @@ CallbackBinance(struct lws *wsi,
                 printf("rx %d '%s'\n", (int)len, (char *)in);
                 Market_event marketEvent = {};
                 LoadMarketEvent((char *)in, &marketEvent);
+                BufferEvent(&marketEvent, &globalMarketEventsBuffer);
                 break;
             }
 
@@ -170,6 +199,8 @@ static struct lws_protocols protocols[] = {
 int
 main()
 {
+    globalMarketEventsBuffer.size = MAX_EVENTS;
+    globalMarketEventsBuffer.currentWriteIndex = 0;
     lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_USER, NULL);
     printf("running\n");
     char *address = StringCat(MARKET_BASE_ENDP, STREAM_PATH);
