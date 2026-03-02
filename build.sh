@@ -8,4 +8,5 @@ clang \
     -fsanitize=address \
     main.cpp \
     -lwebsockets \
+    -lyyjson \
     -o player.out \

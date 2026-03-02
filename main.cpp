@@ -2,11 +2,33 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <libwebsockets.h>
+#include <yyjson.h>
 
 #define MARKET_BASE_ENDP "stream.binance.com"
 #define STREAM_PATH "/ws/bnbbtc@depth"
+#define MAX_LEVELS 10
 
 typedef uint32_t uint32;
+typedef uint64_t uint64;
+typedef float real32;
+typedef double real64;
+
+typedef struct 
+{
+    real64 quantity;
+    real64 price;
+} quote;
+
+typedef struct
+{
+    char *e;
+    uint64 E;
+    char *s;
+    uint64 U;
+    uint64 u;
+    quote asks[MAX_LEVELS]; // 10 levels on each side.
+    quote bids[MAX_LEVELS];
+} Market_event;
 
 uint32
 StringLength(char *str)
@@ -45,6 +67,62 @@ char
     return buffer;
 }
 
+void AddLevelsToEvent(yyjson_val *val, quote quotes[])
+{
+    size_t idx;
+    size_t max;
+    yyjson_val *array;
+    yyjson_arr_foreach(val, idx, max, array)
+    {
+        if (idx >= MAX_LEVELS) break; // only read the max levels.
+        yyjson_val *a;
+        quote q = {};
+        size_t j, jmax;
+        yyjson_arr_foreach(array, j, jmax, a)
+        {
+            char *endptr;
+            const char *str = yyjson_get_str(a);
+            float f = strtod(str, &endptr);
+            if (str == endptr)
+            {
+                printf("Failed str to float conversion\n");
+            }
+            if (j == 0)
+            {
+                q.quantity = f;
+            }
+            else
+            {
+                q.price = f;
+            }
+            printf("q %d, %f\n", (int)j, f);
+        }
+        quotes[idx] = q;
+    }
+}
+
+void LoadMarketEvent(char *input, Market_event *event)
+{
+    yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *e = yyjson_obj_get(root, "e");
+    event->e = (char *)yyjson_get_str(e);
+    yyjson_val *E = yyjson_obj_get(root, "E");
+    event->E = (uint64)yyjson_get_int(E);
+    yyjson_val *s = yyjson_obj_get(root, "s");
+    event->s = (char *)yyjson_get_str(s);
+    yyjson_val *u = yyjson_obj_get(root, "u");
+    event->u = (uint64)yyjson_get_int(u);
+    yyjson_val *U = yyjson_obj_get(root, "U");
+    event->U = (uint64)yyjson_get_int(U);
+    yyjson_val *b = yyjson_obj_get(root, "b");
+    yyjson_val *a = yyjson_obj_get(root, "a");
+    printf("event type is %s\n", yyjson_get_str(e));
+    AddLevelsToEvent(a, event->asks);
+    AddLevelsToEvent(b, event->bids);
+    yyjson_doc_free(doc);
+}
+
 int
 CallbackBinance(struct lws *wsi,
                 enum lws_callback_reasons reason,
@@ -65,9 +143,13 @@ CallbackBinance(struct lws *wsi,
             break;
 
         case LWS_CALLBACK_CLIENT_RECEIVE:
-            ((char *)in)[len] = '\0';
-            printf("rx %d '%s'\n", (int)len, (char *)in);
-            break;
+            {
+                ((char *)in)[len] = '\0';
+                printf("rx %d '%s'\n", (int)len, (char *)in);
+                Market_event marketEvent = {};
+                LoadMarketEvent((char *)in, &marketEvent);
+                break;
+            }
 
         default:
             break;
@@ -77,10 +159,10 @@ CallbackBinance(struct lws *wsi,
 
 static struct lws_protocols protocols[] = {
     {
-        "binance",          // Name of the protocol
-        CallbackBinance,    // Your function pointer
-        0,                  // per_session_data_size (0 if not using)
-        1024,               // rx_buffer_size
+        "binance",
+        CallbackBinance,
+        0,
+        1024,
     },
     { NULL, NULL, 0, 0 }    // Terminator - ALWAYS REQUIRED
 };
