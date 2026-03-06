@@ -257,6 +257,52 @@ SetOrderBook(Order_book *globalOrderBook, Snapshot *globalSnapshot)
 }
 
 void
+ApplyEvent(quote *eventLevels, quote *OBLevels)
+{
+    for (int i = 0; i < MAX_LEVELS; i++)
+    {
+        quote eventAsk = eventLevels[i];
+        // iterate through the orderbook.
+        // TODO(Akhil) : if the qty is 0, remove the level.
+        bool isPriceThere = false;
+        for (int j = 0; j < MAX_LEVELS; j++)
+        {
+            quote OBAsk = OBLevels[j];
+            if (eventAsk.price == OBAsk.price)
+            {
+                OBAsk.quantity = eventAsk.quantity;
+                OBLevels[j] = OBAsk;
+                isPriceThere = true;
+                break;
+            }
+        }
+
+        if (!isPriceThere)
+        {
+            int insertAtIndex = 0;
+            for (int i = 0; i < MAX_LEVELS; i++)
+            {
+                quote OBAsk = OBLevels[i];
+                if (eventAsk.price < OBAsk.price)
+                {
+                    insertAtIndex = i;
+                    break;
+                }
+            }
+
+            for (int j = insertAtIndex + 1; j < MAX_LEVELS; j++)
+            {
+                // shift down.
+                OBLevels[j] = OBLevels[j - 1];
+            }
+
+            // insert after shifting down.
+            OBLevels[insertAtIndex] = eventAsk;
+        }
+    }
+}
+
+void
 IgnoreAndApplyEvents(Order_book *globalOrderBook,
                      Market_events_buffer *globalMarketEventsBuffer,
                      bool *isSnapshot)
@@ -273,48 +319,8 @@ IgnoreAndApplyEvents(Order_book *globalOrderBook,
         }
         else if ((firstId - lastUpdateId) == 1)
         {
-            // apply the event.
-            for (int i = 0; i < MAX_LEVELS; i++)
-            {
-                quote eventAsk = event.asks[i];
-                // iterate through the orderbook.
-                // TODO(Akhil) : if the qty is 0, remove the level.
-                bool isPriceThere = false;
-                for (int j = 0; j < MAX_LEVELS; j++)
-                {
-                    quote OBAsk = globalOrderBook->asks[j];
-                    if (eventAsk.price == OBAsk.price)
-                    {
-                        OBAsk.quantity = eventAsk.quantity;
-                        globalOrderBook->asks[j] = OBAsk;
-                        isPriceThere = true;
-                        break;
-                    }
-                }
-
-                if (!isPriceThere)
-                {
-                    int insertAtIndex = 0;
-                    for (int i = 0; i < MAX_LEVELS; i++)
-                    {
-                        quote OBAsk = globalOrderBook->asks[i];
-                        if (eventAsk.price < OBAsk.price)
-                        {
-                            insertAtIndex = i;
-                            break;
-                        }
-                    }
-
-                    for (int j = insertAtIndex + 1; j < MAX_LEVELS; j++)
-                    {
-                        // shift down.
-                        globalOrderBook->asks[j] = globalOrderBook->asks[j - 1];
-                    }
-
-                    // insert after shifting down.
-                    globalOrderBook->asks[insertAtIndex] = eventAsk;
-                }
-            }
+            ApplyEvent(event.asks, globalOrderBook->asks);
+            ApplyEvent(event.bids, globalOrderBook->bids);
         }
         else
         {
