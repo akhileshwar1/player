@@ -10,4 +10,5 @@ clang \
     main.cpp \
     -lwebsockets \
     -lyyjson \
+    -lcurl \
     -o player.out \

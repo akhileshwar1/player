@@ -3,11 +3,14 @@
 #include <unistd.h>
 #include <libwebsockets.h>
 #include <yyjson.h>
+#include <curl/curl.h>
 
+#define ArrayCount(Array) (sizeof(Array) / sizeof(Array[0]))
 #define MARKET_BASE_ENDP "stream.binance.com"
 #define STREAM_PATH "/ws/bnbbtc@depth"
 #define MAX_LEVELS 10
 #define MAX_EVENTS 10 
+#define SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=BNBBTC&limit=5000"
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
@@ -36,10 +39,24 @@ typedef struct
 {
     uint16 currentWriteIndex;
     uint16 size;
-    Market_event *buffer[MAX_EVENTS];
+    Market_event buffer[MAX_EVENTS];
 } Market_events_buffer;
 
+typedef struct {
+    char *resp;
+    size_t size;
+} Snapshot;
+
+typedef struct
+{
+    uint64 lastUpdateId;
+    quote asks[MAX_LEVELS]; // 10 levels on each side.
+    quote bids[MAX_LEVELS];
+} Order_book;
+
 Market_events_buffer globalMarketEventsBuffer = {};
+Snapshot globalSnapshot = {};
+Order_book globalOrderBook = {};
 
 uint32
 StringLength(char *str)
@@ -139,7 +156,7 @@ LoadMarketEvent(char *input, Market_event *event)
 }
 
 void
-BufferEvent(Market_event *marketEvent, Market_events_buffer *marketEventsBuffer)
+BufferEvent(Market_event marketEvent, Market_events_buffer *marketEventsBuffer)
 {
     uint16 currentWriteIndex = marketEventsBuffer->currentWriteIndex;
     uint16 size = marketEventsBuffer->size;
@@ -148,8 +165,8 @@ BufferEvent(Market_event *marketEvent, Market_events_buffer *marketEventsBuffer)
         marketEventsBuffer->currentWriteIndex = currentWriteIndex % size;
     }
     marketEventsBuffer->buffer[marketEventsBuffer->currentWriteIndex] = marketEvent;
-    printf("Buffered event U %u at index %u\n",
-           marketEvent->U,
+    printf("Buffered event U %lu at index %u\n",
+           marketEvent.U,
            marketEventsBuffer->currentWriteIndex);
     marketEventsBuffer->currentWriteIndex++;
 }
@@ -178,8 +195,10 @@ CallbackBinance(struct lws *wsi,
                 ((char *)in)[len] = '\0';
                 printf("rx %d '%s'\n", (int)len, (char *)in);
                 Market_event marketEvent = {};
+                // TODO(Akhil): There's a double copy happening here,
+                //              could be simpler.
                 LoadMarketEvent((char *)in, &marketEvent);
-                BufferEvent(&marketEvent, &globalMarketEventsBuffer);
+                BufferEvent(marketEvent, &globalMarketEventsBuffer);
                 break;
             }
 
@@ -199,9 +218,128 @@ static struct lws_protocols protocols[] = {
     { NULL, NULL, 0, 0 }    // Terminator - ALWAYS REQUIRED
 };
 
+/* transfer the newly arrived contents in buffer to already
+ * existing struct on userp
+*/
+size_t
+write_data(void *buffer, size_t size, size_t nmemb, void *userp)
+{
+    size_t realsize = size * nmemb;
+    Snapshot *snapshot = (Snapshot *)userp;
+    char *ptr = (char *)realloc(snapshot->resp, snapshot->size + realsize  + 1);
+    if (!ptr) return 0;
+
+    snapshot->resp = ptr;
+    memcpy(snapshot->resp + snapshot->size, buffer, realsize);
+    snapshot->size += realsize;
+    snapshot->resp[snapshot->size] = 0;
+
+    printf("in write call back, size is %zu\n", realsize);
+    return realsize;
+}
+
+// NOTE(Akhil): why void? can't the load fail? json wrong?
+void
+SetOrderBook(Order_book *globalOrderBook, Snapshot *globalSnapshot)
+{
+    char *input = (char *)globalSnapshot->resp;
+    yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *id = yyjson_obj_get(root, "lastUpdateId");
+    uint64 lastUpdateId = (uint64)yyjson_get_int(id);
+    printf("Last update id is %lu\n", lastUpdateId);
+    globalOrderBook->lastUpdateId = lastUpdateId;
+
+    yyjson_val *bids = yyjson_obj_get(root, "bids");
+    yyjson_val *asks = yyjson_obj_get(root, "asks");
+    AddLevelsToEvent(asks, globalOrderBook->asks);
+    AddLevelsToEvent(bids, globalOrderBook->bids);
+}
+
+void
+IgnoreAndApplyEvents(Order_book *globalOrderBook,
+                     Market_events_buffer *globalMarketEventsBuffer,
+                     bool *isSnapshot)
+{
+    for (int i = 0; i < MAX_LEVELS; i++)
+    {
+        Market_event event = globalMarketEventsBuffer->buffer[i];
+        uint64 firstId = event.U; 
+        uint64 lastId = event.u; 
+        uint64 lastUpdateId = globalOrderBook->lastUpdateId;
+        if (lastId < lastUpdateId)
+        {
+            continue; // Ignore.
+        }
+        else if ((firstId - lastUpdateId) == 1)
+        {
+            // apply the event.
+            for (int i = 0; i < MAX_LEVELS; i++)
+            {
+                quote eventAsk = event.asks[i];
+                // iterate through the orderbook.
+                // TODO(Akhil) : if the qty is 0, remove the level.
+                bool isPriceThere = false;
+                for (int j = 0; j < MAX_LEVELS; j++)
+                {
+                    quote OBAsk = globalOrderBook->asks[j];
+                    if (eventAsk.price == OBAsk.price)
+                    {
+                        OBAsk.quantity = eventAsk.quantity;
+                        globalOrderBook->asks[j] = OBAsk;
+                        isPriceThere = true;
+                        break;
+                    }
+                }
+
+                if (!isPriceThere)
+                {
+                    int insertAtIndex = 0;
+                    for (int i = 0; i < MAX_LEVELS; i++)
+                    {
+                        quote OBAsk = globalOrderBook->asks[i];
+                        if (eventAsk.price < OBAsk.price)
+                        {
+                            insertAtIndex = i;
+                            break;
+                        }
+                    }
+
+                    for (int j = insertAtIndex + 1; j < MAX_LEVELS; j++)
+                    {
+                        // shift down.
+                        globalOrderBook->asks[j] = globalOrderBook->asks[j - 1];
+                    }
+
+                    // insert after shifting down.
+                    globalOrderBook->asks[insertAtIndex] = eventAsk;
+                }
+            }
+        }
+        else
+        {
+            // Missed some events, rework the entire snapshot.
+            *isSnapshot = false;
+        }
+    }
+}
+
 int
 main()
 {
+    CURLcode res = curl_global_init(CURL_GLOBAL_ALL);
+    if (res != CURLE_OK) {
+        printf("curl setup failed, abort!");
+        return -1;
+    }
+
+    CURL *curl = curl_easy_init();
+    if (curl == NULL) {
+        printf("curl setup failed, abort!");
+        return -1;
+    }
+
+    bool isSnapshot = false;
     globalMarketEventsBuffer.size = MAX_EVENTS;
     globalMarketEventsBuffer.currentWriteIndex = 0;
     lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_USER, NULL);
@@ -248,8 +386,44 @@ main()
     
     while(1)
     {
+        if (globalMarketEventsBuffer.currentWriteIndex > 0 &&
+            !isSnapshot) {
+            printf("Checking for snapshot...\n");
+            curl_easy_setopt(curl, CURLOPT_URL, SNAPSHOT_URL);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&globalSnapshot);
+            CURLcode result = curl_easy_perform(curl);
+            if (result != CURLE_OK) {
+                printf("curl call failed!, %s abort!\n", curl_easy_strerror(result));
+            }
+            char *input = (char *)globalSnapshot.resp;
+            yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
+            yyjson_val *root = yyjson_doc_get_root(doc);
+            yyjson_val *id = yyjson_obj_get(root, "lastUpdateId");
+            uint64 lastUpdateId = (uint64)yyjson_get_int(id);
+            printf("Last update id is %lu\n", lastUpdateId);
+            Market_event firstEvent = globalMarketEventsBuffer.buffer[0];
+            printf("first update id is %lu\n", firstEvent.U);
+            printf("Compare: lastUpdateId %lu with first event id %lu\n",
+                   lastUpdateId, firstEvent.U);
+            printf("current Write inDex is %u\n",
+                   globalMarketEventsBuffer.currentWriteIndex);
+            if (lastUpdateId > firstEvent.U) {
+                printf("LastUpdateId %lu > the first buffered event id!", lastUpdateId);
+                isSnapshot = true;
+                SetOrderBook(&globalOrderBook, &globalSnapshot);
+                printf("Order book id is %lu\n", globalOrderBook.lastUpdateId);
+                // discard/ignore the buffered events where the id < snapshot id
+                // apply the buffered events to the order book
+                IgnoreAndApplyEvents(&globalOrderBook, &globalMarketEventsBuffer,
+                                     &isSnapshot);
+            }
+        }
+
+        // apply the event to the order book in the callback, if the OB is ready.
         lws_service(context, 0);
     }
+
 
     lws_context_destroy(context);
     return 0;
