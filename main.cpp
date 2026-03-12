@@ -10,7 +10,7 @@
 #define STREAM_PATH "/ws/bnbbtc@depth"
 #define MAX_LEVELS 10
 #define MAX_EVENTS 10 
-#define SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=BNBBTC&limit=5000"
+#define SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=BNBBTC&limit=10"
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
@@ -39,6 +39,7 @@ typedef struct
 {
     uint16 currentWriteIndex;
     uint16 size;
+    uint16 eventCount;
     Market_event buffer[MAX_EVENTS];
 } Market_events_buffer;
 
@@ -118,13 +119,13 @@ AddLevelsToEvent(yyjson_val *val, quote quotes[])
             }
             if (j == 0)
             {
-                q.quantity = f;
+                q.price = f;
             }
             else
             {
-                q.price = f;
+                q.quantity = f;
             }
-            printf("q %d, %f\n", (int)j, f);
+            // printf("q %d, %f\n", (int)j, f);
         }
         quotes[idx] = q;
     }
@@ -169,6 +170,7 @@ BufferEvent(Market_event marketEvent, Market_events_buffer *marketEventsBuffer)
            marketEvent.U,
            marketEventsBuffer->currentWriteIndex);
     marketEventsBuffer->currentWriteIndex++;
+    marketEventsBuffer->eventCount++;
 }
 
 int
@@ -226,15 +228,16 @@ write_data(void *buffer, size_t size, size_t nmemb, void *userp)
 {
     size_t realsize = size * nmemb;
     Snapshot *snapshot = (Snapshot *)userp;
-    char *ptr = (char *)realloc(snapshot->resp, snapshot->size + realsize  + 1);
+    snapshot->size = 0;
+    char *ptr = (char *)realloc(snapshot->resp, realsize  + 1);
     if (!ptr) return 0;
 
     snapshot->resp = ptr;
-    memcpy(snapshot->resp + snapshot->size, buffer, realsize);
-    snapshot->size += realsize;
+    memcpy(snapshot->resp, buffer, realsize);
+    snapshot->size = realsize;
     snapshot->resp[snapshot->size] = 0;
 
-    printf("in write call back, size is %zu\n", realsize);
+    printf("in write call back, size is %zu, resp is %s\n", realsize, snapshot->resp);
     return realsize;
 }
 
@@ -257,32 +260,46 @@ SetOrderBook(Order_book *globalOrderBook, Snapshot *globalSnapshot)
 }
 
 void
-ApplyEvent(quote *eventLevels, quote *OBLevels)
+ApplyEvent(Market_event event, Order_book *globalOrderBook)
 {
+    quote *eventAsks = event.asks;
+    quote *eventBids = event.bids;
+    quote *OBAsks = globalOrderBook->asks;
+    quote *OBBids = globalOrderBook->bids;
+
     for (int i = 0; i < MAX_LEVELS; i++)
     {
-        quote eventAsk = eventLevels[i];
+        quote eventAsk = eventAsks[i];
+        if (eventAsk.price == 0)
+        {
+            continue; // Ignore the ask/bid.
+        }
         // iterate through the orderbook.
         // TODO(Akhil) : if the qty is 0, remove the level.
         bool isPriceThere = false;
         for (int j = 0; j < MAX_LEVELS; j++)
         {
-            quote OBAsk = OBLevels[j];
+            quote OBAsk = OBAsks[j];
             if (eventAsk.price == OBAsk.price)
             {
                 OBAsk.quantity = eventAsk.quantity;
-                OBLevels[j] = OBAsk;
+                OBAsks[j] = OBAsk;
                 isPriceThere = true;
+                printf("New price and quantity is %f , %f\n",
+                       OBAsk.price, OBAsk.quantity);
                 break;
             }
         }
 
         if (!isPriceThere)
         {
-            int insertAtIndex = 0;
+            printf("Inserting new level ask with price %f, q %f\n",
+                   eventAsk.price,
+                   eventAsk.quantity);
+            int insertAtIndex = -1;
             for (int i = 0; i < MAX_LEVELS; i++)
             {
-                quote OBAsk = OBLevels[i];
+                quote OBAsk = OBAsks[i];
                 if (eventAsk.price < OBAsk.price)
                 {
                     insertAtIndex = i;
@@ -290,43 +307,152 @@ ApplyEvent(quote *eventLevels, quote *OBLevels)
                 }
             }
 
+            if (insertAtIndex == -1) continue;
+
+            quote OBAsksCopy[MAX_LEVELS];
+            for (int i = 0; i < MAX_LEVELS; i++)
+            {
+                OBAsksCopy[i] = OBAsks[i];
+            }
+
             for (int j = insertAtIndex + 1; j < MAX_LEVELS; j++)
             {
                 // shift down.
-                OBLevels[j] = OBLevels[j - 1];
+                OBAsks[j] = OBAsksCopy[j - 1];
             }
 
             // insert after shifting down.
-            OBLevels[insertAtIndex] = eventAsk;
+            OBAsks[insertAtIndex] = eventAsk;
+            printf("Inserted new level ask at %d price %f, q %f\n",
+                   insertAtIndex,
+                   eventAsk.price,
+                   eventAsk.quantity);
         }
+    }
+
+    for (int i = 0; i < MAX_LEVELS; i++)
+    {
+        quote eventBid = eventBids[i];
+        if (eventBid.price == 0)
+        {
+            continue; // Ignore the ask/bid.
+        }
+        // iterate through the orderbook.
+        // TODO(Akhil) : if the qty is 0, remove the level.
+        bool isPriceThere = false;
+        for (int j = 0; j < MAX_LEVELS; j++)
+        {
+            quote OBBid = OBBids[j];
+            if (eventBid.price == OBBid.price)
+            {
+                OBBid.quantity = eventBid.quantity;
+                OBBids[j] = OBBid;
+                isPriceThere = true;
+                printf("New price and quantity is %f , %f\n",
+                       OBBid.price, OBBid.quantity);
+                break;
+            }
+        }
+
+        if (!isPriceThere)
+        {
+           printf("Inserting new level bid with price %f, q %f\n",
+                   eventBid.price,
+                   eventBid.quantity);
+            int insertAtIndex = -1;
+            for (int i = 0; i < MAX_LEVELS; i++)
+            {
+                quote OBBid = OBBids[i];
+                if (eventBid.price > OBBid.price)
+                {
+                    insertAtIndex = i;
+                    break;
+                }
+            }
+
+            if (insertAtIndex == -1) continue;
+
+            quote OBBidsCopy[MAX_LEVELS];
+            for (int i = 0; i < MAX_LEVELS; i++)
+            {
+                OBBidsCopy[i] = OBBids[i];
+            }
+
+            for (int j = insertAtIndex + 1; j < MAX_LEVELS; j++)
+            {
+                // shift down.
+                OBBids[j] = OBBidsCopy[j - 1];
+            }
+
+            // insert after shifting down.
+            OBBids[insertAtIndex] = eventBid;
+            printf("Inserted new level bid at %d price %f, q %f\n",
+                   insertAtIndex,
+                   eventBid.price,
+                   eventBid.quantity);
+        }
+    }
+}
+
+void PrintOrderBook(Order_book *globalOrderBook)
+{
+    printf("BIDS===================\n");
+    for (int i = 0; i < MAX_LEVELS; i++)
+    {
+        quote bid = globalOrderBook->bids[i];
+        printf("Price : %f, Quantity: %f\n", bid.price, bid.quantity);
+    }
+
+    printf("ASKS===================\n");
+    for (int i = 0; i < MAX_LEVELS; i++)
+    {
+        quote ask = globalOrderBook->asks[i];
+        printf("Price : %f, Quantity: %f\n", ask.price, ask.quantity);
     }
 }
 
 void
 IgnoreAndApplyEvents(Order_book *globalOrderBook,
                      Market_events_buffer *globalMarketEventsBuffer,
-                     bool *isSnapshot)
+                     bool *isSnapshot,
+                     bool *areEventsApplied)
 {
-    for (int i = 0; i < MAX_LEVELS; i++)
+    uint64 lastUpdateId = globalOrderBook->lastUpdateId;
+    bool applied = false;
+    for (int i = 0; i < MAX_EVENTS; i++)
     {
         Market_event event = globalMarketEventsBuffer->buffer[i];
         uint64 firstId = event.U; 
         uint64 lastId = event.u; 
-        uint64 lastUpdateId = globalOrderBook->lastUpdateId;
-        if (lastId < lastUpdateId)
+        printf("Compare: lastId %lu , firstId %lu, and lastUpdateId %lu\n",
+               lastId, firstId, lastUpdateId);
+        if (lastId <= lastUpdateId)
         {
+            printf("Continuing\n");
             continue; // Ignore.
         }
         else if ((firstId - lastUpdateId) == 1)
         {
-            ApplyEvent(event.asks, globalOrderBook->asks);
-            ApplyEvent(event.bids, globalOrderBook->bids);
+            printf("Applying the event\n");
+            ApplyEvent(event, globalOrderBook);
+            lastUpdateId = lastId;
+            applied = true;
         }
         else
         {
             // Missed some events, rework the entire snapshot.
-            *isSnapshot = false;
+            printf("Rework the snapshot\n");
         }
+    }
+
+    if (applied)
+    {
+       *areEventsApplied = true;
+    }
+    else
+    {
+        *isSnapshot = false;
+        *areEventsApplied = false;
     }
 }
 
@@ -346,6 +472,7 @@ main()
     }
 
     bool isSnapshot = false;
+    bool areEventsApplied = false;
     globalMarketEventsBuffer.size = MAX_EVENTS;
     globalMarketEventsBuffer.currentWriteIndex = 0;
     lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_USER, NULL);
@@ -389,7 +516,7 @@ main()
         printf("Connection failed\n");
         return -1;
     }
-    
+   
     while(1)
     {
         if (globalMarketEventsBuffer.currentWriteIndex > 0 &&
@@ -417,17 +544,22 @@ main()
             if (lastUpdateId > firstEvent.U) {
                 printf("LastUpdateId %lu > the first buffered event id!", lastUpdateId);
                 isSnapshot = true;
-                SetOrderBook(&globalOrderBook, &globalSnapshot);
-                printf("Order book id is %lu\n", globalOrderBook.lastUpdateId);
-                // discard/ignore the buffered events where the id < snapshot id
-                // apply the buffered events to the order book
-                IgnoreAndApplyEvents(&globalOrderBook, &globalMarketEventsBuffer,
-                                     &isSnapshot);
             }
+        }
+        else if (isSnapshot &&
+                 !areEventsApplied)
+        {
+            SetOrderBook(&globalOrderBook, &globalSnapshot);
+            printf("Order book id is %lu\n", globalOrderBook.lastUpdateId);
+            // discard/ignore the buffered events where the id < snapshot id
+            // apply the buffered events to the order book
+            IgnoreAndApplyEvents(&globalOrderBook, &globalMarketEventsBuffer,
+                                 &isSnapshot, &areEventsApplied);
         }
 
         // apply the event to the order book in the callback, if the OB is ready.
         lws_service(context, 0);
+        PrintOrderBook(&globalOrderBook);
     }
 
 
