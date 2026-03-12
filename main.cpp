@@ -58,6 +58,7 @@ typedef struct
 Market_events_buffer globalMarketEventsBuffer = {};
 Snapshot globalSnapshot = {};
 Order_book globalOrderBook = {};
+bool globalAreEventsApplied = false;
 
 uint32
 StringLength(char *str)
@@ -172,93 +173,6 @@ BufferEvent(Market_event marketEvent, Market_events_buffer *marketEventsBuffer)
     marketEventsBuffer->currentWriteIndex++;
     marketEventsBuffer->eventCount++;
 }
-
-int
-CallbackBinance(struct lws *wsi,
-                enum lws_callback_reasons reason,
-                void *user, void *in, size_t len)
-{
-    switch (reason)
-    {
-        case LWS_CALLBACK_CLIENT_ESTABLISHED:
-            printf("callback_binance: LWS_CALLBACK_CLIENT_ESTABLISHED\n");
-            break;
-
-        case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-            printf("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
-            break;
-
-        case LWS_CALLBACK_CLOSED:
-            printf("LWS_CALLBACK_CLOSED\n");
-            break;
-
-        case LWS_CALLBACK_CLIENT_RECEIVE:
-            {
-                ((char *)in)[len] = '\0';
-                printf("rx %d '%s'\n", (int)len, (char *)in);
-                Market_event marketEvent = {};
-                // TODO(Akhil): There's a double copy happening here,
-                //              could be simpler.
-                LoadMarketEvent((char *)in, &marketEvent);
-                BufferEvent(marketEvent, &globalMarketEventsBuffer);
-                break;
-            }
-
-        default:
-            break;
-    }
-    return 0;
-}
-
-static struct lws_protocols protocols[] = {
-    {
-        "binance",
-        CallbackBinance,
-        0,
-        1024,
-    },
-    { NULL, NULL, 0, 0 }    // Terminator - ALWAYS REQUIRED
-};
-
-/* transfer the newly arrived contents in buffer to already
- * existing struct on userp
-*/
-size_t
-write_data(void *buffer, size_t size, size_t nmemb, void *userp)
-{
-    size_t realsize = size * nmemb;
-    Snapshot *snapshot = (Snapshot *)userp;
-    snapshot->size = 0;
-    char *ptr = (char *)realloc(snapshot->resp, realsize  + 1);
-    if (!ptr) return 0;
-
-    snapshot->resp = ptr;
-    memcpy(snapshot->resp, buffer, realsize);
-    snapshot->size = realsize;
-    snapshot->resp[snapshot->size] = 0;
-
-    printf("in write call back, size is %zu, resp is %s\n", realsize, snapshot->resp);
-    return realsize;
-}
-
-// NOTE(Akhil): why void? can't the load fail? json wrong?
-void
-SetOrderBook(Order_book *globalOrderBook, Snapshot *globalSnapshot)
-{
-    char *input = (char *)globalSnapshot->resp;
-    yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
-    yyjson_val *root = yyjson_doc_get_root(doc);
-    yyjson_val *id = yyjson_obj_get(root, "lastUpdateId");
-    uint64 lastUpdateId = (uint64)yyjson_get_int(id);
-    printf("Last update id is %lu\n", lastUpdateId);
-    globalOrderBook->lastUpdateId = lastUpdateId;
-
-    yyjson_val *bids = yyjson_obj_get(root, "bids");
-    yyjson_val *asks = yyjson_obj_get(root, "asks");
-    AddLevelsToEvent(asks, globalOrderBook->asks);
-    AddLevelsToEvent(bids, globalOrderBook->bids);
-}
-
 void
 ApplyEvent(Market_event event, Order_book *globalOrderBook)
 {
@@ -356,7 +270,7 @@ ApplyEvent(Market_event event, Order_book *globalOrderBook)
 
         if (!isPriceThere)
         {
-           printf("Inserting new level bid with price %f, q %f\n",
+            printf("Inserting new level bid with price %f, q %f\n",
                    eventBid.price,
                    eventBid.quantity);
             int insertAtIndex = -1;
@@ -394,6 +308,101 @@ ApplyEvent(Market_event event, Order_book *globalOrderBook)
     }
 }
 
+int
+CallbackBinance(struct lws *wsi,
+                enum lws_callback_reasons reason,
+                void *user, void *in, size_t len)
+{
+    switch (reason)
+    {
+        case LWS_CALLBACK_CLIENT_ESTABLISHED:
+            printf("callback_binance: LWS_CALLBACK_CLIENT_ESTABLISHED\n");
+            break;
+
+        case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+            printf("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
+            break;
+
+        case LWS_CALLBACK_CLOSED:
+            printf("LWS_CALLBACK_CLOSED\n");
+            break;
+
+        case LWS_CALLBACK_CLIENT_RECEIVE:
+            {
+                ((char *)in)[len] = '\0';
+                printf("rx %d '%s'\n", (int)len, (char *)in);
+                Market_event marketEvent = {};
+                // TODO(Akhil): There's a double copy happening here,
+                //              could be simpler.
+                LoadMarketEvent((char *)in, &marketEvent);
+                if (!globalAreEventsApplied)
+                {
+                    BufferEvent(marketEvent, &globalMarketEventsBuffer);
+                }
+                else
+                {
+                    ApplyEvent(marketEvent, &globalOrderBook);
+                }
+                break;
+            }
+
+        default:
+            break;
+    }
+    return 0;
+}
+
+static struct lws_protocols protocols[] = {
+    {
+        "binance",
+        CallbackBinance,
+        0,
+        1024,
+    },
+    { NULL, NULL, 0, 0 }    // Terminator - ALWAYS REQUIRED
+};
+
+/* transfer the newly arrived contents in buffer to already
+ * existing struct on userp
+*/
+size_t
+write_data(void *buffer, size_t size, size_t nmemb, void *userp)
+{
+    size_t realsize = size * nmemb;
+    Snapshot *snapshot = (Snapshot *)userp;
+    snapshot->size = 0;
+    char *ptr = (char *)realloc(snapshot->resp, realsize  + 1);
+    if (!ptr) return 0;
+
+    snapshot->resp = ptr;
+    memcpy(snapshot->resp, buffer, realsize);
+    snapshot->size = realsize;
+    snapshot->resp[snapshot->size] = 0;
+
+    printf("in write call back, size is %zu, resp is %s\n", realsize, snapshot->resp);
+    return realsize;
+}
+
+// NOTE(Akhil): why void? can't the load fail? json wrong?
+void
+SetOrderBook(Order_book *globalOrderBook, Snapshot *globalSnapshot)
+{
+    char *input = (char *)globalSnapshot->resp;
+    yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *id = yyjson_obj_get(root, "lastUpdateId");
+    uint64 lastUpdateId = (uint64)yyjson_get_int(id);
+    printf("Last update id is %lu\n", lastUpdateId);
+    globalOrderBook->lastUpdateId = lastUpdateId;
+
+    yyjson_val *bids = yyjson_obj_get(root, "bids");
+    yyjson_val *asks = yyjson_obj_get(root, "asks");
+    AddLevelsToEvent(asks, globalOrderBook->asks);
+    AddLevelsToEvent(bids, globalOrderBook->bids);
+}
+
+
+
 void PrintOrderBook(Order_book *globalOrderBook)
 {
     printf("BIDS===================\n");
@@ -415,7 +424,7 @@ void
 IgnoreAndApplyEvents(Order_book *globalOrderBook,
                      Market_events_buffer *globalMarketEventsBuffer,
                      bool *isSnapshot,
-                     bool *areEventsApplied)
+                     bool *globalAreEventsApplied)
 {
     uint64 lastUpdateId = globalOrderBook->lastUpdateId;
     bool applied = false;
@@ -447,12 +456,12 @@ IgnoreAndApplyEvents(Order_book *globalOrderBook,
 
     if (applied)
     {
-       *areEventsApplied = true;
+       *globalAreEventsApplied = true;
     }
     else
     {
         *isSnapshot = false;
-        *areEventsApplied = false;
+        *globalAreEventsApplied = false;
     }
 }
 
@@ -472,7 +481,6 @@ main()
     }
 
     bool isSnapshot = false;
-    bool areEventsApplied = false;
     globalMarketEventsBuffer.size = MAX_EVENTS;
     globalMarketEventsBuffer.currentWriteIndex = 0;
     lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_USER, NULL);
@@ -547,14 +555,14 @@ main()
             }
         }
         else if (isSnapshot &&
-                 !areEventsApplied)
+                 !globalAreEventsApplied)
         {
             SetOrderBook(&globalOrderBook, &globalSnapshot);
             printf("Order book id is %lu\n", globalOrderBook.lastUpdateId);
             // discard/ignore the buffered events where the id < snapshot id
             // apply the buffered events to the order book
             IgnoreAndApplyEvents(&globalOrderBook, &globalMarketEventsBuffer,
-                                 &isSnapshot, &areEventsApplied);
+                                 &isSnapshot, &globalAreEventsApplied);
         }
 
         // apply the event to the order book in the callback, if the OB is ready.
