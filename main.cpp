@@ -6,6 +6,7 @@
 #include <curl/curl.h>
 
 #define ArrayCount(Array) (sizeof(Array) / sizeof(Array[0]))
+#define Assert(Expression) if(!(Expression)) {*(int *)0 = 0;}
 #define MARKET_BASE_ENDP "stream.binance.com"
 #define STREAM_PATH "/ws/bnbbtc@depth"
 #define MAX_LEVELS 10
@@ -48,11 +49,19 @@ typedef struct {
     size_t size;
 } Snapshot;
 
+typedef struct quoteNode quoteNode;
+
+struct quoteNode 
+{
+    quote q;
+    quoteNode *next;
+};
+
 typedef struct
 {
     uint64 lastUpdateId;
-    quote asks[MAX_LEVELS]; // 10 levels on each side.
-    quote bids[MAX_LEVELS];
+    quoteNode *asks; // 10 levels on each side.
+    quoteNode *bids;
 } Order_book;
 
 typedef enum
@@ -135,15 +144,52 @@ AddLevelsToEvent(yyjson_val *val, quote quotes[], quoteType type)
             // printf("q %d, %f\n", (int)j, f);
         }
 
-        switch(type)
-        {
-            case ASK:
-            quotes[idx] = q; // lowest ask is the best ask.
-            break;
+        quotes[idx] = q;
+    }
+}
 
-            case BID:
-            quotes[MAX_LEVELS - 1 - idx] = q; // highest bid is the best bid.
-            break;
+void
+AddLevelsToOB(yyjson_val *val, quoteNode *ptr)
+{
+    size_t idx;
+    size_t max;
+    yyjson_val *array;
+    yyjson_arr_foreach(val, idx, max, array)
+    {
+        if (idx >= MAX_LEVELS) break; // only read the max levels.
+        yyjson_val *a;
+        quoteNode node = {};
+        size_t j, jmax;
+        yyjson_arr_foreach(array, j, jmax, a)
+        {
+            char *endptr;
+            const char *str = yyjson_get_str(a);
+            float f = strtod(str, &endptr);
+            if (str == endptr)
+            {
+                printf("Failed str to float conversion\n");
+            }
+            if (j == 0)
+            {
+                node.q.price = f;
+            }
+            else
+            {
+                node.q.quantity = f;
+            }
+            // printf("q %d, %f\n", (int)j, f);
+        }
+
+
+        if (idx == 0)
+        {
+            ptr = &node;
+            ptr->next = NULL;
+        }
+        else
+        {
+            ptr->next = &node;
+            node.next = NULL;
         }
     }
 }
@@ -189,137 +235,124 @@ BufferEvent(Market_event marketEvent, Market_events_buffer *marketEventsBuffer)
     marketEventsBuffer->currentWriteIndex++;
     marketEventsBuffer->eventCount++;
 }
+
+
+
 void
 ApplyEvent(Market_event event, Order_book *globalOrderBook)
 {
     quote *eventAsks = event.asks;
     quote *eventBids = event.bids;
-    quote *OBAsks = globalOrderBook->asks;
-    quote *OBBids = globalOrderBook->bids;
+    quoteNode *OBAsks = globalOrderBook->asks;
+    quoteNode *OBBids = globalOrderBook->bids;
 
+    Assert(ArrayCount(event.asks) == MAX_LEVELS)
     for (int i = 0; i < MAX_LEVELS; i++)
     {
         quote eventAsk = eventAsks[i];
-        if (eventAsk.price == 0)
+        quoteNode *insertAt;
+        if (eventAsk.quantity == 0)
         {
-            continue; // Ignore the ask/bid.
-        }
-        // iterate through the orderbook.
-        // TODO(Akhil) : if the qty is 0, remove the level.
-        bool isPriceThere = false;
-        for (int j = 0; j < MAX_LEVELS; j++)
-        {
-            quote OBAsk = OBAsks[j];
-            if (eventAsk.price == OBAsk.price)
+            // remove from the linked list.
+            quoteNode *ptr = OBAsks;
+            quoteNode *prev = ptr;
+            while (ptr != NULL)
             {
-                OBAsk.quantity = eventAsk.quantity;
-                OBAsks[j] = OBAsk;
-                isPriceThere = true;
-                printf("New price and quantity is %f , %f\n",
-                       OBAsk.price, OBAsk.quantity);
-                break;
-            }
-        }
-
-        if (!isPriceThere)
-        {
-            printf("Inserting new level ask with price %f, q %f\n",
-                   eventAsk.price,
-                   eventAsk.quantity);
-            int insertAtIndex = -1;
-            for (int i = 0; i < MAX_LEVELS; i++)
-            {
-                quote OBAsk = OBAsks[i];
-                if (eventAsk.price < OBAsk.price)
+                if (ptr->q.price == eventAsk.price)
                 {
-                    insertAtIndex = i;
+                    prev->next = ptr->next;
                     break;
                 }
+                prev = ptr;
+                ptr = ptr->next;
             }
-
-            if (insertAtIndex == -1) continue;
-
-            quote OBAsksCopy[MAX_LEVELS];
-            for (int i = 0; i < MAX_LEVELS; i++)
+        }
+        else
+        {
+            quoteNode *ptr = OBAsks;
+            quoteNode *prev = ptr;
+            while (ptr != NULL)
             {
-                OBAsksCopy[i] = OBAsks[i];
+                if (ptr->q.price == eventAsk.price)
+                {
+                    insertAt = NULL;
+                    ptr->q.quantity = eventAsk.quantity;
+                    break;
+                }
+                else if (eventAsk.price < ptr->q.price)
+                {
+                    insertAt = prev;
+                    prev->next = ptr->next;
+                    ptr->next = NULL;
+                    break;
+                }
+
+                prev = ptr;
+                ptr = ptr->next;
             }
 
-            for (int j = insertAtIndex + 1; j < MAX_LEVELS; j++)
+            if (insertAt != NULL)
             {
-                // shift down.
-                OBAsks[j] = OBAsksCopy[j - 1];
+                quoteNode node = {};
+                node.q = eventAsk;
+                node.next = prev->next;
+                prev->next = &node;
             }
-
-            // insert after shifting down.
-            OBAsks[insertAtIndex] = eventAsk;
-            printf("Inserted new level ask at %d price %f, q %f\n",
-                   insertAtIndex,
-                   eventAsk.price,
-                   eventAsk.quantity);
         }
     }
 
+    Assert(ArrayCount(event.asks) == MAX_LEVELS)
     for (int i = 0; i < MAX_LEVELS; i++)
     {
         quote eventBid = eventBids[i];
-        if (eventBid.price == 0)
+        quoteNode *insertAt;
+        if (eventBid.quantity == 0)
         {
-            continue; // Ignore the ask/bid.
-        }
-        // iterate through the orderbook.
-        // TODO(Akhil) : if the qty is 0, remove the level.
-        bool isPriceThere = false;
-        for (int j = 0; j < MAX_LEVELS; j++)
-        {
-            quote OBBid = OBBids[j];
-            if (eventBid.price == OBBid.price)
+            // remove from the linked list.
+            quoteNode *ptr = OBBids;
+            quoteNode *prev = ptr;
+            while (ptr != NULL)
             {
-                OBBid.quantity = eventBid.quantity;
-                OBBids[j] = OBBid;
-                isPriceThere = true;
-                printf("New price and quantity is %f , %f\n",
-                       OBBid.price, OBBid.quantity);
-                break;
-            }
-        }
-
-        if (!isPriceThere)
-        {
-            printf("Inserting new level bid with price %f, q %f\n",
-                   eventBid.price,
-                   eventBid.quantity);
-            int insertAtIndex = -1;
-            for (int i = 0; i < MAX_LEVELS; i++)
-            {
-                quote OBBid = OBBids[i];
-                if (eventBid.price > OBBid.price)
+                if (ptr->q.price == eventBid.price)
                 {
-                    insertAtIndex = i;
+                    prev->next = ptr->next;
                     break;
                 }
+                prev = ptr;
+                ptr = ptr->next;
             }
-
-            if (insertAtIndex == -1) continue;
-
-            quote OBBidsCopy[MAX_LEVELS];
-            for (int i = 0; i < MAX_LEVELS; i++)
+        }
+        else
+        {
+            quoteNode *ptr = OBBids;
+            quoteNode *prev = ptr;
+            while (ptr != NULL)
             {
-                OBBidsCopy[i] = OBBids[i];
+                if (ptr->q.price == eventBid.price)
+                {
+                    insertAt = NULL;
+                    ptr->q.quantity = eventBid.quantity;
+                    break;
+                }
+                else if (eventBid.price < ptr->q.price)
+                {
+                    insertAt = prev;
+                    prev->next = ptr->next;
+                    ptr->next = NULL;
+                    break;
+                }
+
+                prev = ptr;
+                ptr = ptr->next;
             }
 
-            for (int j = insertAtIndex + 1; j < MAX_LEVELS; j++)
+            if (insertAt != NULL)
             {
-                // shift down.
-                OBBids[j] = OBBidsCopy[j - 1];
+                quoteNode node = {};
+                node.q = eventBid;
+                node.next = prev->next;
+                prev->next = &node;
             }
-
-            // insert after shifting down.
-            OBBids[insertAtIndex] = eventBid;
-            printf("Inserted new level bid at %d price %f, q %f\n",
-                   insertAtIndex,
-                   eventBid.price,
-                   eventBid.quantity);
         }
     }
 }
@@ -413,26 +446,26 @@ SetOrderBook(Order_book *globalOrderBook, Snapshot *globalSnapshot)
 
     yyjson_val *bids = yyjson_obj_get(root, "bids");
     yyjson_val *asks = yyjson_obj_get(root, "asks");
-    AddLevelsToEvent(asks, globalOrderBook->asks, ASK);
-    AddLevelsToEvent(bids, globalOrderBook->bids, BID);
+    AddLevelsToOB(asks, globalOrderBook->asks);
+    AddLevelsToOB(bids, globalOrderBook->bids);
 }
-
-
 
 void PrintOrderBook(Order_book *globalOrderBook)
 {
     printf("BIDS===================\n");
-    for (int i = 0; i < MAX_LEVELS; i++)
+    quoteNode *ptr = globalOrderBook->asks;
+    while (ptr != NULL)
     {
-        quote bid = globalOrderBook->bids[i];
-        printf("Price : %f, Quantity: %f\n", bid.price, bid.quantity);
+        printf("Price : %f, Quantity: %f\n", ptr->q.price, ptr->q.quantity);
+        ptr = ptr->next;
     }
 
     printf("ASKS===================\n");
-    for (int i = 0; i < MAX_LEVELS; i++)
+    ptr = globalOrderBook->bids;
+    while (ptr != NULL)
     {
-        quote ask = globalOrderBook->asks[i];
-        printf("Price : %f, Quantity: %f\n", ask.price, ask.quantity);
+        printf("Price : %f, Quantity: %f\n", ptr->q.price, ptr->q.quantity);
+        ptr = ptr->next;
     }
 }
 
