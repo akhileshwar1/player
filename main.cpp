@@ -55,6 +55,12 @@ typedef struct
     quote bids[MAX_LEVELS];
 } Order_book;
 
+typedef enum
+{
+    ASK,
+    BID
+} quoteType;
+
 Market_events_buffer globalMarketEventsBuffer = {};
 Snapshot globalSnapshot = {};
 Order_book globalOrderBook = {};
@@ -98,7 +104,7 @@ char
 }
 
 void
-AddLevelsToEvent(yyjson_val *val, quote quotes[])
+AddLevelsToEvent(yyjson_val *val, quote quotes[], quoteType type)
 {
     size_t idx;
     size_t max;
@@ -128,7 +134,17 @@ AddLevelsToEvent(yyjson_val *val, quote quotes[])
             }
             // printf("q %d, %f\n", (int)j, f);
         }
-        quotes[idx] = q;
+
+        switch(type)
+        {
+            case ASK:
+            quotes[idx] = q; // lowest ask is the best ask.
+            break;
+
+            case BID:
+            quotes[MAX_LEVELS - 1 - idx] = q; // highest bid is the best bid.
+            break;
+        }
     }
 }
 
@@ -152,8 +168,8 @@ LoadMarketEvent(char *input, Market_event *event)
     yyjson_val *b = yyjson_obj_get(root, "b");
     yyjson_val *a = yyjson_obj_get(root, "a");
     printf("event type is %s\n", yyjson_get_str(e));
-    AddLevelsToEvent(a, event->asks);
-    AddLevelsToEvent(b, event->bids);
+    AddLevelsToEvent(a, event->asks, ASK);
+    AddLevelsToEvent(b, event->bids, BID);
     yyjson_doc_free(doc);
 }
 
@@ -397,8 +413,8 @@ SetOrderBook(Order_book *globalOrderBook, Snapshot *globalSnapshot)
 
     yyjson_val *bids = yyjson_obj_get(root, "bids");
     yyjson_val *asks = yyjson_obj_get(root, "asks");
-    AddLevelsToEvent(asks, globalOrderBook->asks);
-    AddLevelsToEvent(bids, globalOrderBook->bids);
+    AddLevelsToEvent(asks, globalOrderBook->asks, ASK);
+    AddLevelsToEvent(bids, globalOrderBook->bids, BID);
 }
 
 
