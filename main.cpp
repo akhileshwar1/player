@@ -209,8 +209,9 @@ ApplyEvent(Market_event event, Order_book *globalOrderBook)
                     OBAsks[j].quantity = eventAsk.quantity;
                     break;
                 }
-                else if (eventAsk.quantity != 0.0 &&
-                         eventAsk.price < OBAsks[j].price)
+                else if ((eventAsk.quantity != 0.0 &&
+                          eventAsk.price < OBAsks[j].price) || // insert the holes formed by removal.
+                         (OBAsks[j].price == 0.0))
                 {
                     insertAt = j;
                     printf("inserting ask at posn %d\n", insertAt);
@@ -244,10 +245,18 @@ ApplyEvent(Market_event event, Order_book *globalOrderBook)
                     OBAsksCopy[i] = OBAsks[i];
                 }
 
-                // shift up now.
-                for (int i = removeAt; i < MAX_LEVELS - 1; i++)
+                // shift up now and insert an hole at the end.
+                for (int i = removeAt; i < MAX_LEVELS; i++)
                 {
-                    OBAsks[i] = OBAsksCopy[i + 1];
+                    if (i == MAX_LEVELS - 1)
+                    {
+                        printf("inserting hole at the end\n");
+                        OBAsks[i].price = 0.0;
+                    }
+                    else
+                    {
+                        OBAsks[i] = OBAsksCopy[i + 1];
+                    }
                 }
             }
         }
@@ -277,8 +286,9 @@ ApplyEvent(Market_event event, Order_book *globalOrderBook)
                     OBBids[j].quantity = eventBid.quantity;
                     break;
                 }
-                else if (eventBid.quantity != 0.0 &&
-                         eventBid.price > OBBids[j].price)
+                else if((eventBid.quantity != 0.0 &&
+                         eventBid.price > OBBids[j].price) || // insert the holes formed by removal.
+                         (OBBids[j].price == 0.0)) 
                 {
                     insertAt = j;
                     printf("inserting bid at posn %d\n", insertAt);
@@ -312,10 +322,18 @@ ApplyEvent(Market_event event, Order_book *globalOrderBook)
                     OBBidsCopy[i] = OBBids[i];
                 }
 
-                // shift up now.
-                for (int i = removeAt; i < MAX_LEVELS - 1; i++)
+                // shift up now and insert an hole at the end.
+                for (int i = removeAt; i < MAX_LEVELS; i++)
                 {
-                    OBBids[i] = OBBidsCopy[i + 1];
+                    if (i == MAX_LEVELS - 1)
+                    {
+                        printf("inserting hole at the end\n");
+                        OBBids[i].price = 0.0;
+                    }
+                    else
+                    {
+                        OBBids[i] = OBBidsCopy[i + 1];
+                    }
                 }
             }
         }
