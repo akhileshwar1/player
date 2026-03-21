@@ -135,12 +135,19 @@ AddLevelsToEvent(yyjson_val *val, quote *quotes)
     }
 }
 
-// TODO(Akhil): Make this handle incomplete inputs that are 
-// later completed.
-void
-LoadMarketEvent(char *input, Market_event *event)
+yyjson_doc
+*IsEventComplete(char *input)
 {
     yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *e = yyjson_obj_get(root, "e");
+    if (e == NULL) return NULL;
+    else return doc;
+}
+
+void
+LoadMarketEvent(yyjson_doc *doc, Market_event *event)
+{
     yyjson_val *root = yyjson_doc_get_root(doc);
     yyjson_val *e = yyjson_obj_get(root, "e");
     event->e = (char *)yyjson_get_str(e);
@@ -340,6 +347,22 @@ ApplyEvent(Market_event event, Order_book *globalOrderBook)
     }
 }
 
+void
+LoadBufferAndApplyEvent(Market_event marketEvent, Order_book *globalOrderBook,
+                        Market_events_buffer *globalMarketEventsBuffer,
+                        bool globalAreEventsApplied, yyjson_doc *doc)
+{
+    LoadMarketEvent(doc, &marketEvent);
+    if (!globalAreEventsApplied)
+    {
+        BufferEvent(marketEvent, globalMarketEventsBuffer);
+    }
+    else
+    {
+        ApplyEvent(marketEvent, globalOrderBook);
+    }
+}
+
 int
 CallbackBinance(struct lws *wsi,
                 enum lws_callback_reasons reason,
@@ -366,44 +389,28 @@ CallbackBinance(struct lws *wsi,
                 Market_event marketEvent = {};
                 // TODO(Akhil): There's a double copy happening here,
                 //              could be simpler.
-                yyjson_doc *doc = yyjson_read((char *)in, StringLength((char *)in), 0);
-                yyjson_val *root = yyjson_doc_get_root(doc);
-                yyjson_val *e = yyjson_obj_get(root, "e");
-                if (e == NULL)
+                yyjson_doc *doc = IsEventComplete((char *)in);
+                if (doc == NULL)
                 {
                     globalEvent = StringCat(globalEvent, (char *)in);
                 }
                 else
                 {
-                    LoadMarketEvent((char *)in, &marketEvent);
-                    if (!globalAreEventsApplied)
-                    {
-                        BufferEvent(marketEvent, &globalMarketEventsBuffer);
-                    }
-                    else
-                    {
-                        ApplyEvent(marketEvent, &globalOrderBook);
-                    }
+                    LoadBufferAndApplyEvent(marketEvent, &globalOrderBook,
+                                            &globalMarketEventsBuffer,
+                                            globalAreEventsApplied, doc);
                 }
 
-                doc = yyjson_read(globalEvent, StringLength(globalEvent), 0);
-                root = yyjson_doc_get_root(doc);
-                e = yyjson_obj_get(root, "e");
-                if (e != NULL)
+                doc = IsEventComplete(globalEvent); 
+                if (doc != NULL)
                 {
                     printf("NOT null anymore %s\n", globalEvent);
-                    LoadMarketEvent(globalEvent, &marketEvent);
-                    globalEvent = "";
-                    if (!globalAreEventsApplied)
-                    {
-                        BufferEvent(marketEvent, &globalMarketEventsBuffer);
-                    }
-                    else
-                    {
-                        ApplyEvent(marketEvent, &globalOrderBook);
-                    }
-                }
+                    LoadBufferAndApplyEvent(marketEvent, &globalOrderBook,
+                                            &globalMarketEventsBuffer,
+                                            globalAreEventsApplied, doc);
 
+                    globalEvent = "";
+                }
                 break;
             }
 
