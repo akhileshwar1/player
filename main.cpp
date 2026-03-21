@@ -56,11 +56,16 @@ typedef struct
     quote bids[MAX_LEVELS]; // store from best bid/highest bid to the worst bid.
 } Order_book;
 
-Market_events_buffer globalMarketEventsBuffer = {};
-Snapshot globalSnapshot = {};
-Order_book globalOrderBook = {};
-bool globalAreEventsApplied = false;
-char *globalEvent = "";
+typedef struct
+{
+    char *event;
+    Market_events_buffer MarketEventsBuffer;
+    Snapshot Snapshot;
+    Order_book OrderBook;
+    bool AreEventsApplied;
+    bool isSnapshot;
+} State;
+
 
 uint32
 StringLength(char *str)
@@ -187,12 +192,12 @@ BufferEvent(Market_event marketEvent, Market_events_buffer *marketEventsBuffer)
 
 
 void
-ApplyEvent(Market_event event, Order_book *globalOrderBook)
+ApplyEvent(Market_event event, Order_book *OrderBook)
 {
     quote *eventAsks = event.asks;
     quote *eventBids = event.bids;
-    quote *OBAsks = globalOrderBook->asks;
-    quote *OBBids = globalOrderBook->bids;
+    quote *OBAsks = OrderBook->asks;
+    quote *OBBids = OrderBook->bids;
 
     for (int i = 0; i < MAX_LEVELS; i++)
     {
@@ -348,18 +353,19 @@ ApplyEvent(Market_event event, Order_book *globalOrderBook)
 }
 
 void
-LoadBufferAndApplyEvent(Market_event marketEvent, Order_book *globalOrderBook,
-                        Market_events_buffer *globalMarketEventsBuffer,
-                        bool globalAreEventsApplied, yyjson_doc *doc)
+LoadBufferAndApplyEvent(Market_event marketEvent, State *state, yyjson_doc *doc)
 {
+    Order_book *OrderBook = &state->OrderBook;
+    Market_events_buffer *MarketEventsBuffer = &state->MarketEventsBuffer;
+    bool AreEventsApplied = state->AreEventsApplied;
     LoadMarketEvent(doc, &marketEvent);
-    if (!globalAreEventsApplied)
+    if (!AreEventsApplied)
     {
-        BufferEvent(marketEvent, globalMarketEventsBuffer);
+        BufferEvent(marketEvent, MarketEventsBuffer);
     }
     else
     {
-        ApplyEvent(marketEvent, globalOrderBook);
+        ApplyEvent(marketEvent, OrderBook);
     }
 }
 
@@ -392,24 +398,19 @@ CallbackBinance(struct lws *wsi,
                 yyjson_doc *doc = IsEventComplete((char *)in);
                 if (doc == NULL)
                 {
-                    globalEvent = StringCat(globalEvent, (char *)in);
+                    ((State *)user)->event = StringCat(((State *)user)->event, (char *)in);
                 }
                 else
                 {
-                    LoadBufferAndApplyEvent(marketEvent, &globalOrderBook,
-                                            &globalMarketEventsBuffer,
-                                            globalAreEventsApplied, doc);
+                    LoadBufferAndApplyEvent(marketEvent, (State *)user, doc);
                 }
 
-                doc = IsEventComplete(globalEvent); 
+                doc = IsEventComplete(((State *)user)->event); 
                 if (doc != NULL)
                 {
-                    printf("NOT null anymore %s\n", globalEvent);
-                    LoadBufferAndApplyEvent(marketEvent, &globalOrderBook,
-                                            &globalMarketEventsBuffer,
-                                            globalAreEventsApplied, doc);
-
-                    globalEvent = "";
+                    printf("NOT null anymore %s\n", ((State *)user)->event);
+                    LoadBufferAndApplyEvent(marketEvent, (State *)user, doc);
+                    ((State *)user)->event = "";
                 }
                 break;
             }
@@ -453,27 +454,30 @@ write_data(void *buffer, size_t size, size_t nmemb, void *userp)
 
 // NOTE(Akhil): why void? can't the load fail? json wrong?
 void
-SetOrderBook(Order_book *globalOrderBook, Snapshot *globalSnapshot)
+SetOrderBook(State *state)
 {
-    char *input = (char *)globalSnapshot->resp;
+    Order_book *OrderBook = &state->OrderBook;
+    Snapshot *Snapshot = &state->Snapshot;
+    char *input = (char *)Snapshot->resp;
     yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
     yyjson_val *root = yyjson_doc_get_root(doc);
     yyjson_val *id = yyjson_obj_get(root, "lastUpdateId");
     uint64 lastUpdateId = (uint64)yyjson_get_int(id);
     printf("Last update id is %lu\n", lastUpdateId);
-    globalOrderBook->lastUpdateId = lastUpdateId;
+    OrderBook->lastUpdateId = lastUpdateId;
 
     yyjson_val *bids = yyjson_obj_get(root, "bids");
     yyjson_val *asks = yyjson_obj_get(root, "asks");
-    AddLevelsToEvent(asks, globalOrderBook->asks);
-    AddLevelsToEvent(bids, globalOrderBook->bids);
+    AddLevelsToEvent(asks, OrderBook->asks);
+    AddLevelsToEvent(bids, OrderBook->bids);
 }
 
-void PrintOrderBook(Order_book *globalOrderBook)
+void PrintOrderBook(State *state)
 {
+    Order_book *OrderBook = &state->OrderBook;
     printf("BIDS===================\n");
-    quote *bids = globalOrderBook->bids;
-    quote *asks = globalOrderBook->asks;
+    quote *bids = OrderBook->bids;
+    quote *asks = OrderBook->asks;
     for (int i = 0; i < MAX_LEVELS; i++)
     {
         printf("Price: %f, quantity: %f\n", bids[i].price, bids[i].quantity);
@@ -487,16 +491,17 @@ void PrintOrderBook(Order_book *globalOrderBook)
 }
 
 void
-IgnoreAndApplyEvents(Order_book *globalOrderBook,
-                     Market_events_buffer *globalMarketEventsBuffer,
-                     bool *isSnapshot,
-                     bool *globalAreEventsApplied)
+IgnoreAndApplyEvents(State *state)
 {
-    uint64 lastUpdateId = globalOrderBook->lastUpdateId;
+    Order_book *OrderBook = &state->OrderBook;
+    Market_events_buffer *MarketEventsBuffer = &state->MarketEventsBuffer;
+    bool *isSnapshot = &state->isSnapshot;
+    bool *AreEventsApplied = &state->AreEventsApplied;
+    uint64 lastUpdateId = OrderBook->lastUpdateId;
     bool applied = false;
     for (int i = 0; i < MAX_EVENTS; i++)
     {
-        Market_event event = globalMarketEventsBuffer->buffer[i];
+        Market_event event = MarketEventsBuffer->buffer[i];
         uint64 firstId = event.U; 
         uint64 lastId = event.u; 
         printf("Compare: lastId %lu , firstId %lu, and lastUpdateId %lu\n",
@@ -509,7 +514,7 @@ IgnoreAndApplyEvents(Order_book *globalOrderBook,
         else if ((firstId - lastUpdateId) == 1)
         {
             printf("Applying the event\n");
-            ApplyEvent(event, globalOrderBook);
+            ApplyEvent(event, OrderBook);
             lastUpdateId = lastId;
             applied = true;
         }
@@ -522,12 +527,12 @@ IgnoreAndApplyEvents(Order_book *globalOrderBook,
 
     if (applied)
     {
-       *globalAreEventsApplied = true;
+       *AreEventsApplied = true;
     }
     else
     {
         *isSnapshot = false;
-        *globalAreEventsApplied = false;
+        *AreEventsApplied = false;
     }
 }
 
@@ -546,9 +551,11 @@ main()
         return -1;
     }
 
-    bool isSnapshot = false;
-    globalMarketEventsBuffer.size = MAX_EVENTS;
-    globalMarketEventsBuffer.currentWriteIndex = 0;
+    State state = {};
+    state.event = "";
+    state.isSnapshot = false;
+    state.MarketEventsBuffer.size = MAX_EVENTS;
+    state.MarketEventsBuffer.currentWriteIndex = 0;
     lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_USER, NULL);
     printf("running\n");
     char *address = StringCat(MARKET_BASE_ENDP, STREAM_PATH);
@@ -584,6 +591,7 @@ main()
     ccinfo.ssl_connection = LCCSCF_USE_SSL;
     ccinfo.ietf_version_or_minus_one = -1;
     ccinfo.protocol = "binance";
+    ccinfo.userdata = (void *)&state;
     struct lws *lws = lws_client_connect_via_info(&ccinfo);
     if (lws == NULL)
     {
@@ -593,47 +601,46 @@ main()
    
     while(1)
     {
-        if (globalMarketEventsBuffer.currentWriteIndex > 0 &&
-            !isSnapshot) {
+        if (state.MarketEventsBuffer.currentWriteIndex > 0 &&
+            !state.isSnapshot) {
             printf("Checking for snapshot...\n");
             curl_easy_setopt(curl, CURLOPT_URL, SNAPSHOT_URL);
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&globalSnapshot);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&state.Snapshot);
             CURLcode result = curl_easy_perform(curl);
             if (result != CURLE_OK) {
                 printf("curl call failed!, %s abort!\n", curl_easy_strerror(result));
             }
-            char *input = (char *)globalSnapshot.resp;
+            char *input = (char *)state.Snapshot.resp;
             yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
             yyjson_val *root = yyjson_doc_get_root(doc);
             yyjson_val *id = yyjson_obj_get(root, "lastUpdateId");
             uint64 lastUpdateId = (uint64)yyjson_get_int(id);
             printf("Last update id is %lu\n", lastUpdateId);
-            Market_event firstEvent = globalMarketEventsBuffer.buffer[0];
+            Market_event firstEvent = state.MarketEventsBuffer.buffer[0];
             printf("first update id is %lu\n", firstEvent.U);
             printf("Compare: lastUpdateId %lu with first event id %lu\n",
                    lastUpdateId, firstEvent.U);
             printf("current Write inDex is %u\n",
-                   globalMarketEventsBuffer.currentWriteIndex);
+                   state.MarketEventsBuffer.currentWriteIndex);
             if (lastUpdateId > firstEvent.U) {
                 printf("LastUpdateId %lu > the first buffered event id!", lastUpdateId);
-                isSnapshot = true;
+                state.isSnapshot = true;
             }
         }
-        else if (isSnapshot &&
-                 !globalAreEventsApplied)
+        else if (state.isSnapshot &&
+                 !state.AreEventsApplied)
         {
-            SetOrderBook(&globalOrderBook, &globalSnapshot);
-            printf("Order book id is %lu\n", globalOrderBook.lastUpdateId);
+            SetOrderBook(&state);
+            printf("Order book id is %lu\n", state.OrderBook.lastUpdateId);
             // discard/ignore the buffered events where the id < snapshot id
             // apply the buffered events to the order book
-            IgnoreAndApplyEvents(&globalOrderBook, &globalMarketEventsBuffer,
-                                 &isSnapshot, &globalAreEventsApplied);
+            IgnoreAndApplyEvents(&state);
         }
 
         // apply the event to the order book in the callback, if the OB is ready.
         lws_service(context, 0);
-        PrintOrderBook(&globalOrderBook);
+        PrintOrderBook(&state);
     }
 
 
