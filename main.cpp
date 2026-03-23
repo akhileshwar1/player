@@ -56,6 +56,7 @@ typedef struct
     quote bids[MAX_LEVELS]; // store from best bid/highest bid to the worst bid.
 } Order_book;
 
+typedef struct timespec timespec;
 typedef struct
 {
     char *event;
@@ -64,8 +65,16 @@ typedef struct
     Order_book OrderBook;
     bool AreEventsApplied;
     bool isSnapshot;
+    real64 startPrice;
+    timespec lastTime;
 } State;
 
+real64 XtimeElapsedMS (timespec lastTime, timespec endTime) {
+    real64 timeElapsedSeconds = endTime.tv_sec - lastTime.tv_sec;
+    real64 timeElapsedNanoSeconds = endTime.tv_nsec - lastTime.tv_nsec;
+    real64 timeElapsedMS = (timeElapsedSeconds * 1000.0f)  + (timeElapsedNanoSeconds / (1000.0f * 1000.0f));
+    return timeElapsedMS;
+}
 
 uint32
 StringLength(char *str)
@@ -412,6 +421,25 @@ CallbackBinance(struct lws *wsi,
                     LoadBufferAndApplyEvent(marketEvent, (State *)user, doc);
                     ((State *)user)->event = "";
                 }
+
+                // after each orderbook update, check the delta of the price.
+                if (((State *)user)->AreEventsApplied)
+                {
+                    real64 lastPrice = (((State *)user)->OrderBook).asks[0].price;
+                    timespec endTime;
+                    clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
+                    if ((lastPrice - ((State *)user)->startPrice) > 0.1)
+                    {
+                        real64 timeElapsedMS= XtimeElapsedMS(
+                            ((State *)user)->lastTime,
+                            endTime
+                        );
+                        printf("Greater than 2 dollars %f\n", timeElapsedMS);
+                        ((State *)user)->startPrice = lastPrice;
+                        ((State *)user)->lastTime = endTime;
+                    }
+
+                }
                 break;
             }
 
@@ -518,6 +546,8 @@ IgnoreAndApplyEvents(State *state)
             ApplyEvent(event, OrderBook);
             lastUpdateId = lastId;
             applied = true;
+            state->startPrice = (OrderBook->asks)[0].price;
+            clock_gettime(CLOCK_MONOTONIC_RAW, &(state->lastTime));
         }
         else
         {
