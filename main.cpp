@@ -8,10 +8,10 @@
 #define ArrayCount(Array) (sizeof(Array) / sizeof(Array[0]))
 #define Assert(Expression) if(!(Expression)) {*(int *)0 = 0;}
 #define MARKET_BASE_ENDP "stream.binance.com"
-#define STREAM_PATH "/ws/bnbbtc@depth"
+#define STREAM_PATH "/ws/zecusdt@depth"
 #define MAX_LEVELS 10
 #define MAX_EVENTS 10 
-#define SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=BNBBTC&limit=10"
+#define SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=ZECUSDT&limit=10"
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
@@ -189,8 +189,6 @@ BufferEvent(Market_event marketEvent, Market_events_buffer *marketEventsBuffer)
     marketEventsBuffer->eventCount++;
 }
 
-
-
 void
 ApplyEvent(Market_event event, Order_book *OrderBook)
 {
@@ -223,7 +221,8 @@ ApplyEvent(Market_event event, Order_book *OrderBook)
                 }
                 else if ((eventAsk.quantity != 0.0 &&
                           eventAsk.price < OBAsks[j].price) || // insert the holes formed by removal.
-                         (OBAsks[j].price == 0.0))
+                         (eventAsk.quantity != 0.0 &&
+                          OBAsks[j].price == 0.0))
                 {
                     insertAt = j;
                     printf("inserting ask at posn %d\n", insertAt);
@@ -300,7 +299,8 @@ ApplyEvent(Market_event event, Order_book *OrderBook)
                 }
                 else if((eventBid.quantity != 0.0 &&
                          eventBid.price > OBBids[j].price) || // insert the holes formed by removal.
-                         (OBBids[j].price == 0.0)) 
+                         (eventBid.quantity != 0.0 &&
+                          OBBids[j].price == 0.0)) 
                 {
                     insertAt = j;
                     printf("inserting bid at posn %d\n", insertAt);
@@ -472,7 +472,8 @@ SetOrderBook(State *state)
     AddLevelsToEvent(bids, OrderBook->bids);
 }
 
-void PrintOrderBook(State *state)
+void
+PrintOrderBook(State *state)
 {
     Order_book *OrderBook = &state->OrderBook;
     printf("BIDS===================\n");
