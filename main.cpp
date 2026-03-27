@@ -11,6 +11,7 @@
 #define Assert(Expression) if(!(Expression)) {*(int *)0 = 0;}
 #define MARKET_BASE_ENDP "stream.binance.com"
 #define STREAM_PATH "/ws/solusdt@depth"
+#define TRADE_STREAM_PATH "/ws/solusdt@trade"
 #define MAX_LEVELS 10
 #define MAX_EVENTS 10 
 #define SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=SOLUSDT&limit=10"
@@ -547,10 +548,47 @@ CallbackBinance(struct lws *wsi,
     return 0;
 }
 
+int
+CallbackBinanceTrade(struct lws *wsi,
+                enum lws_callback_reasons reason,
+                void *user, void *in, size_t len)
+{
+    switch (reason)
+    {
+        case LWS_CALLBACK_CLIENT_ESTABLISHED:
+            printf("callback_binance: LWS_CALLBACK_CLIENT_ESTABLISHED\n");
+            break;
+
+        case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+            printf("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
+            break;
+
+        case LWS_CALLBACK_CLOSED:
+            printf("LWS_CALLBACK_CLOSED\n");
+            break;
+
+        case LWS_CALLBACK_CLIENT_RECEIVE:
+            {
+                ((char *)in)[len] = '\0';
+                printf("rx Trade %d '%s'\n", (int)len, (char *)in);
+            }
+
+        default:
+            break;
+    }
+    return 0;
+}
+
 static struct lws_protocols protocols[] = {
     {
         "binance",
         CallbackBinance,
+        0,
+        1024,
+    },
+    {
+        "binance-trade",
+        CallbackBinanceTrade,
         0,
         1024,
     },
@@ -728,7 +766,31 @@ main()
         printf("Connection failed\n");
         return -1;
     }
-   
+
+    struct lws_protocols protocolTrade = {};
+    protocol.name = "binance-trade";
+    protocol.callback = CallbackBinanceTrade;
+    protocol.per_session_data_size = 256;
+
+    struct lws_client_connect_info ccinfoTrade = {};
+    ccinfoTrade.context = context;
+    ccinfoTrade.address = MARKET_BASE_ENDP;
+    ccinfoTrade.port = port;
+    ccinfoTrade.ssl_connection = 1;
+    ccinfoTrade.path = TRADE_STREAM_PATH;
+    ccinfoTrade.host = ccinfo.address;
+    ccinfoTrade.origin = ccinfo.address;
+    ccinfoTrade.ssl_connection = LCCSCF_USE_SSL;
+    ccinfoTrade.ietf_version_or_minus_one = -1;
+    ccinfoTrade.protocol = "binance-trade";
+    ccinfoTrade.userdata = (void *)&state;
+    struct lws *lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
+    if (lwsTrade == NULL)
+    {
+        printf("Connection failed\n");
+        return -1;
+    }
+
     while(1)
     {
         if (state.MarketEventsBuffer.currentWriteIndex > 0 &&
