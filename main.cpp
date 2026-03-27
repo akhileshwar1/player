@@ -4,14 +4,17 @@
 #include <libwebsockets.h>
 #include <yyjson.h>
 #include <curl/curl.h>
+#include <openssl/hmac.h>
+#include <openssl/evp.h>
 
 #define ArrayCount(Array) (sizeof(Array) / sizeof(Array[0]))
 #define Assert(Expression) if(!(Expression)) {*(int *)0 = 0;}
 #define MARKET_BASE_ENDP "stream.binance.com"
-#define STREAM_PATH "/ws/zecusdt@depth"
+#define STREAM_PATH "/ws/solusdt@depth"
 #define MAX_LEVELS 10
 #define MAX_EVENTS 10 
-#define SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=ZECUSDT&limit=10"
+#define SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=SOLUSDT&limit=10"
+#define TRADE_URL "https://api.binance.com/api/v3/order?"
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
@@ -67,6 +70,9 @@ typedef struct
     bool isSnapshot;
     real64 startPrice;
     timespec lastTime;
+    real64 timeToClose;
+    bool isOpen;
+    CURL *curl;
 } State;
 
 real64 XtimeElapsedMS (timespec lastTime, timespec endTime) {
@@ -378,6 +384,55 @@ LoadBufferAndApplyEvent(Market_event marketEvent, State *state, yyjson_doc *doc)
     }
 }
 
+uint64
+BinanceTimestamp() {
+    timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    // Convert to milliseconds
+    return ((uint64)(ts.tv_sec) * 1000) + ((uint64)(ts.tv_nsec) / 1000000);
+}
+
+void generate_signature(const char* query, const char* secret, char* out_hex) {
+    unsigned char hash[32];
+    unsigned int len = 32;
+
+    HMAC(EVP_sha256(), secret, strlen(secret), 
+         (unsigned char*)query, strlen(query), hash, &len);
+
+    for (int i = 0; i < 32; i++) {
+        sprintf(out_hex + (i * 2), "%02x", hash[i]);
+    }
+}
+
+void
+BinanceMakeOrder(CURL *curl, char *body)
+{
+    curl_easy_reset(curl);
+    char signed_body[2048];
+    char signature[65]; // 64 hex chars + null terminator
+
+    struct curl_slist *headers = NULL;
+    char key_header[128];
+    snprintf(key_header, sizeof(key_header), "X-MBX-APIKEY: %s", getenv("API_KEY"));
+    headers = curl_slist_append(headers, key_header);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
+    // Generate the hex signature from the current body
+    char *secret = getenv("API_SECRET");
+    generate_signature(body, getenv("API_SECRET"), signature);
+
+    // Combine the body and the signature
+    snprintf(signed_body, sizeof(signed_body), "%s&signature=%s", body, signature);
+    printf("signed body is %s\n", signed_body);
+    curl_easy_setopt(curl, CURLOPT_URL, StringCat(TRADE_URL,
+                                                  signed_body));
+    CURLcode result = curl_easy_perform(curl);
+    if (result != CURLE_OK) {
+        printf("curl call failed!, %s abort!\n", curl_easy_strerror(result));
+    }
+}
+
 int
 CallbackBinance(struct lws *wsi,
                 enum lws_callback_reasons reason,
@@ -423,22 +478,65 @@ CallbackBinance(struct lws *wsi,
                 }
 
                 // after each orderbook update, check the delta of the price.
-                if (((State *)user)->AreEventsApplied)
+                if (((State *)user)->AreEventsApplied && !((State *)user)->isOpen)
                 {
                     real64 lastPrice = (((State *)user)->OrderBook).asks[0].price;
+                    printf("start price is %f\n", ((State *)user)->startPrice);
                     timespec endTime;
                     clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
-                    if ((lastPrice - ((State *)user)->startPrice) > 0.1)
+                    if (((lastPrice - ((State *)user)->startPrice)) > 0.1)
                     {
-                        real64 timeElapsedMS= XtimeElapsedMS(
+                        real64 timeElapsedMS = XtimeElapsedMS(
                             ((State *)user)->lastTime,
                             endTime
                         );
-                        printf("Greater than 2 dollars %f\n", timeElapsedMS);
+                        printf("opening the position after %f at lastPrice %f\n",
+                               timeElapsedMS,
+                               lastPrice);
+                        // make the order call.
+                        CURL *curl = ((State *)user)->curl;
+                        uint64 timestamp = BinanceTimestamp();
+                        char body[300];
+                        sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+                                "SOLUSDT",
+                                "BUY",
+                                "MARKET",
+                                0.1,
+                                timestamp);
+                        printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+                        BinanceMakeOrder(curl, body);
+                        ((State *)user)->timeToClose = 2 * timeElapsedMS;
+                        ((State *)user)->isOpen = true;
+                    }
+                }
+                // close the position.
+                else if (((State *)user)->AreEventsApplied && ((State *)user)->isOpen)
+                {
+                    timespec endTime;
+                    real64 lastPrice = (((State *)user)->OrderBook).asks[0].price;
+                    clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
+                    real64 timeElapsedMS = XtimeElapsedMS(
+                        ((State *)user)->lastTime,
+                        endTime
+                    );
+                    if (timeElapsedMS > ((State *)user)->timeToClose)
+                    {
+                        printf("closing the position at lastPrice %f\n", lastPrice);
+                        CURL *curl = ((State *)user)->curl;
+                        char body[300];
+                        uint64 timestamp = BinanceTimestamp();
+                        sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+                                "SOLUSDT",
+                                "SELL",
+                                "MARKET",
+                                0.1,
+                                timestamp);
+                        printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+                        BinanceMakeOrder(curl, body);
+                        ((State *)user)->isOpen = false;
                         ((State *)user)->startPrice = lastPrice;
                         ((State *)user)->lastTime = endTime;
                     }
-
                 }
                 break;
             }
@@ -583,6 +681,7 @@ main()
     }
 
     State state = {};
+    state.curl = curl;
     state.event = "";
     state.isSnapshot = false;
     state.MarketEventsBuffer.size = MAX_EVENTS;

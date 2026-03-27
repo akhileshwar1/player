@@ -72,6 +72,15 @@ rx 865 '00000"],["0.00911800","14.98500000"],["0.00911900","41.64200000"],["0.00
 "0.00922900","0.60200000"],["0.00923600","1.43900000"],["0.00929800","13.14700000"],["0.0093020
 0","2.28800000"]]}'
 event type is (null)
+
+{"symbol":"SOLUSDT","orderId":16811287354,"orderListId":-1,"clientOrderId":"HbeL7d9XJ4vYUwNIdEb
+aur","transactTime":1774451543952,"price":"0.00000000","origQty":"0.10000000","executedQty":"0.
+10000000","origQuoteOrderQty":"0.00000000","cummulativeQuoteQty":"9.15300000","status":"FILLED"
+,"timeInForce":"GTC","type":"MARKET","side":"BUY","workingTime":1774451543952,"fills":[{"price"
+:"91.53000000","qty":"0.02900000","commission":"0.00002900","commissionAsset":"SOL","tradeId":1
+919086117},{"price":"91.53000000","qty":"0.05800000","commission":"0.00005800","commissionAsset
+":"SOL","tradeId":1919086118},{"price":"91.53000000","qty":"0.01300000","commission":"0.0000130
+0","commissionAsset":"SOL","tradeId":1919086119}],"selfTradePreventionMode":"EXPIRE_MAKER"}
 */
 
 int main()

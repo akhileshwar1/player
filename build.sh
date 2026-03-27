@@ -11,4 +11,5 @@ clang \
     -lwebsockets \
     -lyyjson \
     -lcurl \
+    -lcrypto \
     -o player.out \
