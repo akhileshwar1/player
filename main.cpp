@@ -42,6 +42,17 @@ typedef struct
 
 typedef struct
 {
+    char *e;
+    char *s;
+    uint64 id;
+    real64 price;
+    real64 quantity;
+    uint64 time;
+    bool bmaker; // is buyer the market maker?
+} Trade_event;
+
+typedef struct
+{
     uint16 currentWriteIndex;
     uint16 size;
     uint16 eventCount;
@@ -287,7 +298,6 @@ ApplyEvent(Market_event event, Order_book *OrderBook)
                 }
             }
         }
-
     }
 
     // go for the bids now.
@@ -548,6 +558,27 @@ CallbackBinance(struct lws *wsi,
     return 0;
 }
 
+void
+LoadTradeEvent(Trade_event *trade, char *input)
+{
+    yyjson_doc *doc = yyjson_read(input , StringLength(input), 0);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *e = yyjson_obj_get(root, "e");
+    trade->e = (char *)yyjson_get_str(e);
+    yyjson_val *s = yyjson_obj_get(root, "s");
+    trade->s = (char *)yyjson_get_str(s);
+    yyjson_val *id = yyjson_obj_get(root, "t");
+    trade->id = (uint64)yyjson_get_int(s);
+    yyjson_val *price = yyjson_obj_get(root, "p");
+    trade->price = (real64)atof(yyjson_get_str(price));
+    yyjson_val *quantity = yyjson_obj_get(root, "q");
+    trade->quantity = (real64)atof(yyjson_get_str(quantity));
+    yyjson_val *time = yyjson_obj_get(root, "T");
+    trade->time = (real64)(yyjson_get_int(time));
+    yyjson_val *bmaker = yyjson_obj_get(root, "m");
+    trade->bmaker = (bool)yyjson_get_bool(s);
+}
+
 int
 CallbackBinanceTrade(struct lws *wsi,
                 enum lws_callback_reasons reason,
@@ -571,6 +602,8 @@ CallbackBinanceTrade(struct lws *wsi,
             {
                 ((char *)in)[len] = '\0';
                 printf("rx Trade %d '%s'\n", (int)len, (char *)in);
+                Trade_event trade = {};
+                LoadTradeEvent(&trade, (char *)in);
             }
 
         default:
