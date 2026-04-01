@@ -42,6 +42,14 @@ typedef struct
 
 typedef struct
 {
+    uint16 currentWriteIndex;
+    uint16 size;
+    uint16 eventCount;
+    Market_event buffer[MAX_EVENTS];
+} Market_events_buffer;
+
+typedef struct
+{
     char *e;
     char *s;
     uint64 id;
@@ -56,8 +64,8 @@ typedef struct
     uint16 currentWriteIndex;
     uint16 size;
     uint16 eventCount;
-    Market_event buffer[MAX_EVENTS];
-} Market_events_buffer;
+    Trade_event buffer[MAX_EVENTS];
+} Trade_events_buffer;
 
 typedef struct {
     char *resp;
@@ -71,20 +79,32 @@ typedef struct
     quote bids[MAX_LEVELS]; // store from best bid/highest bid to the worst bid.
 } Order_book;
 
+typedef enum
+{
+    LONG,
+    SHORT,
+    ZERO
+} Posn_type;
+
 typedef struct timespec timespec;
 typedef struct
 {
     char *event;
     Market_events_buffer MarketEventsBuffer;
+    Trade_events_buffer TradeEventsBuffer;
     Snapshot Snapshot;
     Order_book OrderBook;
+    real64 startPrice;
+    real64 timeToClose;
+    real64 timeToRefresh;
+    real64 buyPressure;
+    real64 sellPressure;
+    timespec lastTime;
+    bool isOpen;
     bool AreEventsApplied;
     bool isSnapshot;
-    real64 startPrice;
-    timespec lastTime;
-    real64 timeToClose;
-    bool isOpen;
     CURL *curl;
+    Posn_type posnType; 
 } State;
 
 real64 XtimeElapsedMS (timespec lastTime, timespec endTime) {
@@ -214,6 +234,23 @@ BufferEvent(Market_event marketEvent, Market_events_buffer *marketEventsBuffer)
            marketEventsBuffer->currentWriteIndex);
     marketEventsBuffer->currentWriteIndex++;
     marketEventsBuffer->eventCount++;
+}
+
+// TODO(Akhil): abstract the above and below into one func.
+void
+BufferTradeEvent(Trade_event tradeEvent, Trade_events_buffer *tradeEventsBuffer)
+{
+    uint16 currentWriteIndex = tradeEventsBuffer->currentWriteIndex;
+    uint16 size = tradeEventsBuffer->size;
+    if (currentWriteIndex >= size)
+    {
+        tradeEventsBuffer->currentWriteIndex = currentWriteIndex % size;
+    }
+    tradeEventsBuffer->buffer[tradeEventsBuffer->currentWriteIndex] = tradeEvent;
+    printf("Buffered event at index %u\n",
+           tradeEventsBuffer->currentWriteIndex);
+    tradeEventsBuffer->currentWriteIndex++;
+    tradeEventsBuffer->eventCount++;
 }
 
 void
@@ -487,68 +524,6 @@ CallbackBinance(struct lws *wsi,
                     LoadBufferAndApplyEvent(marketEvent, (State *)user, doc);
                     ((State *)user)->event = "";
                 }
-
-                // after each orderbook update, check the delta of the price.
-                if (((State *)user)->AreEventsApplied && !((State *)user)->isOpen)
-                {
-                    real64 lastPrice = (((State *)user)->OrderBook).asks[0].price;
-                    printf("start price is %f\n", ((State *)user)->startPrice);
-                    timespec endTime;
-                    clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
-                    if (((lastPrice - ((State *)user)->startPrice)) > 0.1)
-                    {
-                        real64 timeElapsedMS = XtimeElapsedMS(
-                            ((State *)user)->lastTime,
-                            endTime
-                        );
-                        printf("opening the position after %f at lastPrice %f\n",
-                               timeElapsedMS,
-                               lastPrice);
-                        // make the order call.
-                        CURL *curl = ((State *)user)->curl;
-                        uint64 timestamp = BinanceTimestamp();
-                        char body[300];
-                        sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
-                                "SOLUSDT",
-                                "BUY",
-                                "MARKET",
-                                0.1,
-                                timestamp);
-                        printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
-                        BinanceMakeOrder(curl, body);
-                        ((State *)user)->timeToClose = 2 * timeElapsedMS;
-                        ((State *)user)->isOpen = true;
-                    }
-                }
-                // close the position.
-                else if (((State *)user)->AreEventsApplied && ((State *)user)->isOpen)
-                {
-                    timespec endTime;
-                    real64 lastPrice = (((State *)user)->OrderBook).asks[0].price;
-                    clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
-                    real64 timeElapsedMS = XtimeElapsedMS(
-                        ((State *)user)->lastTime,
-                        endTime
-                    );
-                    if (timeElapsedMS > ((State *)user)->timeToClose)
-                    {
-                        printf("closing the position at lastPrice %f\n", lastPrice);
-                        CURL *curl = ((State *)user)->curl;
-                        char body[300];
-                        uint64 timestamp = BinanceTimestamp();
-                        sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
-                                "SOLUSDT",
-                                "SELL",
-                                "MARKET",
-                                0.1,
-                                timestamp);
-                        printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
-                        BinanceMakeOrder(curl, body);
-                        ((State *)user)->isOpen = false;
-                        ((State *)user)->startPrice = lastPrice;
-                        ((State *)user)->lastTime = endTime;
-                    }
-                }
                 break;
             }
 
@@ -559,7 +534,7 @@ CallbackBinance(struct lws *wsi,
 }
 
 void
-LoadTradeEvent(Trade_event *trade, char *input)
+LoadTradeEvent(Trade_event *trade, char *input, State *state)
 {
     yyjson_doc *doc = yyjson_read(input , StringLength(input), 0);
     yyjson_val *root = yyjson_doc_get_root(doc);
@@ -576,7 +551,17 @@ LoadTradeEvent(Trade_event *trade, char *input)
     yyjson_val *time = yyjson_obj_get(root, "T");
     trade->time = (real64)(yyjson_get_int(time));
     yyjson_val *bmaker = yyjson_obj_get(root, "m");
-    trade->bmaker = (bool)yyjson_get_bool(s);
+    trade->bmaker = yyjson_get_bool(bmaker);
+    if (trade->bmaker)
+    {
+        state->sellPressure += trade->quantity;
+        printf("Sell pressure added to %f\n", state->sellPressure);
+    }
+    else
+    {
+        state->buyPressure += trade->quantity;
+        printf("Buy pressure added to %f\n", state->buyPressure);
+    }
 }
 
 int
@@ -603,7 +588,204 @@ CallbackBinanceTrade(struct lws *wsi,
                 ((char *)in)[len] = '\0';
                 printf("rx Trade %d '%s'\n", (int)len, (char *)in);
                 Trade_event trade = {};
-                LoadTradeEvent(&trade, (char *)in);
+                LoadTradeEvent(&trade, (char *)in, (State *)user);
+                BufferTradeEvent(trade, &((State *)user)->TradeEventsBuffer);
+                real64 buyPressure = ((State *)user)->buyPressure;
+                real64 sellPressure = ((State *)user)->sellPressure;
+                real64 lastPrice = ((State *)user)->
+                    TradeEventsBuffer.
+                    buffer[MAX_EVENTS - 1].price;
+
+                if (((State *)user)->AreEventsApplied && !((State *)user)->isOpen &&
+                    lastPrice != 0.0)
+                {
+                    timespec endTime;
+                    clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
+                    real64 timeElapsedMS = XtimeElapsedMS(
+                        ((State *)user)->lastTime,
+                        endTime
+                    );
+
+                    if (timeElapsedMS > ((State *)user)->timeToRefresh)
+                    {
+                        ((State *)user)->startPrice = lastPrice;
+                        ((State *)user)->lastTime = endTime;
+                        ((State *)user)->buyPressure = 0.0;
+                        ((State *)user)->sellPressure = 0.0;
+                    }
+
+                    printf("start price is %f\n", ((State *)user)->startPrice);
+
+                    if (abs((lastPrice - ((State *)user)->startPrice)) < 1)
+                    {
+                        printf("Guilty! There is no price movement\n");
+                    }
+                    else
+                    {
+                        CURL *curl = ((State *)user)->curl;
+                        uint64 timestamp = BinanceTimestamp();
+                        char body[300];
+                        if (lastPrice > (((State *)user)->startPrice))
+                        {
+                            if (buyPressure < 2 * sellPressure)
+                            {
+                                printf("Guilty! Not enough pressure on buy side\n");
+                            }
+                            else if (timeElapsedMS < 25 * 60 * 1000)
+                            {
+                                printf("Guilty! Too fast, need real slow and steady!\n");
+                            }
+                            else
+                            {
+                                printf("opening the position after %f at lastPrice %f\n",
+                                       timeElapsedMS,
+                                       lastPrice);
+                                // make the order call.
+                                sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+                                        "SOLUSDT",
+                                        "BUY",
+                                        "MARKET",
+                                        0.1,
+                                        timestamp);
+                                printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+                                ((State *)user)->posnType = LONG;
+                                BinanceMakeOrder(curl, body);
+                                ((State *)user)->timeToClose = timeElapsedMS;
+                                ((State *)user)->lastTime = endTime;
+                                ((State *)user)->isOpen = true;
+                                ((State *)user)->buyPressure = 0.0;
+                                ((State *)user)->sellPressure = 0.0;
+                            }
+                        }
+                        else
+                        {
+                            if (sellPressure < 2 * buyPressure)
+                            {
+                                printf("Guilty! Not enough pressure on sell side\n");
+                            }
+                            else if (timeElapsedMS < 25 * 60 * 1000)
+                            {
+                                printf("Guilty! Too fast, need real slow and steady!\n");
+                            }
+                            else
+                            {
+                                printf("opening the position after %f at lastPrice %f\n",
+                                       timeElapsedMS,
+                                       lastPrice);
+                                // make the order call.
+                                sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+                                        "SOLUSDT",
+                                        "SELL",
+                                        "MARKET",
+                                        0.1,
+                                        timestamp);
+                                printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+                                ((State *)user)->posnType = SHORT;
+                                BinanceMakeOrder(curl, body);
+                                ((State *)user)->timeToClose = timeElapsedMS;
+                                ((State *)user)->lastTime = endTime;
+                                ((State *)user)->isOpen = true;
+                                ((State *)user)->buyPressure = 0.0;
+                                ((State *)user)->sellPressure = 0.0;
+                            }
+                        }
+                    }
+                }
+                // close the position.
+                else if (((State *)user)->AreEventsApplied && ((State *)user)->isOpen &&
+                         lastPrice != 0.0)
+                {
+
+                    timespec endTime;
+                    clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
+                    real64 timeElapsedMS = XtimeElapsedMS(
+                        ((State *)user)->lastTime,
+                        endTime
+                    );
+                    Posn_type posnType = ((State *)user)->posnType;
+                    printf("position is open, remaining time %f\n",
+                           ((State *)user)->timeToClose - timeElapsedMS);
+
+                    if (timeElapsedMS < ((State *)user)->timeToClose)
+                    {
+                        printf("Guilty! No need to close, time not out\n");
+                    }
+                    else if (posnType == LONG && !(sellPressure > 2 * buyPressure))
+                    {
+                        printf("Guilty! No need to close, long pressure not reversed, so Load up!\n");
+                        printf("Loading the position at lastPrice %f\n", lastPrice);
+                        CURL *curl = ((State *)user)->curl;
+                        char body[300];
+                        uint64 timestamp = BinanceTimestamp();
+                        sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+                                "SOLUSDT",
+                                "SELL",
+                                "MARKET",
+                                0.1,
+                                timestamp);
+                        printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+                        BinanceMakeOrder(curl, body);
+                        ((State *)user)->startPrice = lastPrice;
+                        ((State *)user)->lastTime = endTime;
+                        ((State *)user)->buyPressure = 0.0;
+                        ((State *)user)->sellPressure = 0.0;
+                        ((State *)user)->timeToClose *= 2;
+                    }
+                    else if (posnType == SHORT && !(buyPressure > 2 * sellPressure))
+                    {
+                        printf("Guilty! No need to close, short pressure not reversed, so Load up!\n");
+                        printf("Loading the position at lastPrice %f\n", lastPrice);
+                        CURL *curl = ((State *)user)->curl;
+                        char body[300];
+                        uint64 timestamp = BinanceTimestamp();
+                        sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+                                "SOLUSDT",
+                                "SELL",
+                                "MARKET",
+                                0.1,
+                                timestamp);
+                        printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+                        BinanceMakeOrder(curl, body);
+                        ((State *)user)->startPrice = lastPrice;
+                        ((State *)user)->lastTime = endTime;
+                        ((State *)user)->buyPressure = 0.0;
+                        ((State *)user)->sellPressure = 0.0;
+                        ((State *)user)->timeToClose *= 2;
+                    }
+                    else // will only close now when the pressure's have reversed.
+                    {
+                        printf("closing the position at lastPrice %f\n", lastPrice);
+                        CURL *curl = ((State *)user)->curl;
+                        char body[300];
+                        uint64 timestamp = BinanceTimestamp();
+                        if (posnType == LONG)
+                        {
+                            sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+                                    "SOLUSDT",
+                                    "SELL",
+                                    "MARKET",
+                                    0.1,
+                                    timestamp);
+                        }
+                        else if (posnType == SHORT)
+                        {
+                            sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+                                    "SOLUSDT",
+                                    "BUY",
+                                    "MARKET",
+                                    0.1,
+                                    timestamp);
+                        }
+                        printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+                        BinanceMakeOrder(curl, body);
+                        ((State *)user)->posnType = ZERO;
+                        ((State *)user)->isOpen = false;
+                        ((State *)user)->startPrice = lastPrice;
+                        ((State *)user)->lastTime = endTime;
+                        ((State *)user)->buyPressure = 0.0;
+                        ((State *)user)->sellPressure = 0.0;
+                    }
+                }
             }
 
         default:
@@ -689,6 +871,15 @@ PrintOrderBook(State *state)
 }
 
 void
+PrintTradeState(State *state)
+{
+    printf("FORCES===================\n");
+    printf("START PRICE %f\n", state->startPrice); 
+    printf("SELL PRESSURE %f\n", state->sellPressure); 
+    printf("BUY PRESSURE %f\n", state->buyPressure); 
+}
+
+void
 IgnoreAndApplyEvents(State *state)
 {
     Order_book *OrderBook = &state->OrderBook;
@@ -757,6 +948,11 @@ main()
     state.isSnapshot = false;
     state.MarketEventsBuffer.size = MAX_EVENTS;
     state.MarketEventsBuffer.currentWriteIndex = 0;
+    state.TradeEventsBuffer.size = MAX_EVENTS;
+    state.TradeEventsBuffer.currentWriteIndex = 0;
+    state.buyPressure = 0.0;
+    state.sellPressure = 0.0;
+    state.timeToRefresh = 30 * 60 * 1000;
     lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_USER, NULL);
     printf("running\n");
     char *address = StringCat(MARKET_BASE_ENDP, STREAM_PATH);
@@ -866,6 +1062,7 @@ main()
         // apply the event to the order book in the callback, if the OB is ready.
         lws_service(context, 0);
         PrintOrderBook(&state);
+        PrintTradeState(&state);
     }
 
 
