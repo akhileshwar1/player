@@ -3,8 +3,10 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdint.h>
+#include <time.h>
 
 #define MAX_EVENTS 10 
+#define MAX_TIME_PERIOD 5 * 60 * 60 * 1000 // 5 hours in milliseconds. 
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
@@ -55,6 +57,32 @@ typedef struct
     Posn_type posnType; 
 } State;
 
+typedef enum
+{
+   BUY,
+   SELL
+} Side;
+
+typedef struct
+{
+    char *symbol;
+    real64 price;
+    real64 qty;
+} Position;
+
+typedef struct
+{
+    real64 price;
+    real64 qty;
+    Side side;
+} Trade;
+
+typedef struct
+{
+    real64 usdt;
+    real64 coin;
+} Wallet;
+
 void
 LoadTradeEvent(Trade_event *trade, char *line, State *state)
 {
@@ -78,7 +106,7 @@ LoadTradeEvent(Trade_event *trade, char *line, State *state)
         }
         else if (i ==  4)
         {
-            trade->time = (uint64)atoi(token);
+            trade->time = (uint64)atof(token);
         }
         else if (i ==  5)
         {
@@ -132,22 +160,43 @@ BufferTradeEvent(Trade_event tradeEvent, Trade_events_buffer *tradeEventsBuffer)
     tradeEventsBuffer->eventCount++;
 }
 
+char
+*formatMSTimestamp(uint64 ms_timestamp) {
+    time_t seconds = ms_timestamp / 1000;
+    int millis = ms_timestamp % 1000;
+
+    struct tm *tm_info = gmtime(&seconds); // Use gmtime for UTC
+
+    char buffer[26];
+    char final_string[32];
+
+    // Format the date and time without milliseconds
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", tm_info);
+
+    // Append the milliseconds manually
+    snprintf(final_string, sizeof(final_string), "%s.%03d", buffer, millis);
+
+    return final_string;
+}
+
 int
 main()
 {
-    FILE *myFile = fopen("data.csv", "r");
+    FILE *myFile = fopen("data05.csv", "r");
     if (myFile == NULL)
     {
         printf("Couldn't open file\n");
         return -1;
     }
     FILE *outputFile = fopen("output.txt", "w");
+    setbuf(outputFile, NULL); // Disables buffering completely
     if (outputFile == NULL)
     {
         printf("Couldn't open file\n");
         return -1;
     }
 
+    fputs("Timestamp, symbol, side, price, qty, curr_value, pnl", outputFile);
     char line[1024];
     State state = {};
     state.TradeEventsBuffer.size = MAX_EVENTS;
@@ -155,7 +204,11 @@ main()
     state.buyPressure = 0.0;
     state.sellPressure = 0.0;
     state.timeToRefresh = 30 * 60 * 1000;
-
+    Position position = {};
+    position.symbol = "SOLUSDT";
+    Wallet wallet = {};
+    wallet.usdt = 1000;
+    wallet.coin = 100;
     while (fgets(line, sizeof(line), myFile) != NULL)
     {
         char *tmp = strchr(line, '\n');
@@ -203,18 +256,29 @@ main()
                         printf("Guilty! Too fast, need real slow and steady!\n");
                     }
                     else
-                {
+                    {
                         printf("opening the position after %f at lastPrice %f\n",
                                timeElapsedMS,
                                lastPrice);
+                        Trade trade = {};
+                        real64 qty = 0.1;
+                        trade.qty = qty;
+                        trade.price = lastPrice;
+                        trade.side = BUY;
+                        position.qty += qty;
+                        position.price = lastPrice;
+                        wallet.coin += qty;
+                        wallet.usdt -= qty * lastPrice;
+
                         // make the order call.
-                        sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+                        sprintf(body, "%lu, %s, %s, %f, %f, %f, %f",
+                                formatMSTimestamp(endTime),
                                 "SOLUSDT",
                                 "BUY",
-                                "MARKET",
-                                0.1,
-                                endTime);
-                        printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+                                lastPrice,
+                                qty,
+                                position.qty * position.price,
+                                0.0);
                         state.posnType = LONG;
                         // BinanceMakeOrder(curl, body);
                         fputs(strcat(body, "\n"), outputFile);
@@ -240,14 +304,25 @@ main()
                         printf("opening the position after %f at lastPrice %f\n",
                                timeElapsedMS,
                                lastPrice);
+                        Trade trade = {};
+                        real64 qty = -0.1;
+                        trade.qty = qty;
+                        trade.price = lastPrice;
+                        trade.side = SELL;
+                        position.qty += qty;
+                        position.price = lastPrice;
+                        wallet.coin += qty;
+                        wallet.usdt -= qty * lastPrice;
+
                         // make the order call.
-                        sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+                        sprintf(body, "%lu, %s, %s, %f, %f, %f, %f",
+                                formatMSTimestamp(endTime),
                                 "SOLUSDT",
                                 "SELL",
-                                "MARKET",
-                                0.1,
-                                endTime);
-                        printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+                                lastPrice,
+                                qty,
+                                position.qty * position.price,
+                                0.0);
                         state.posnType = SHORT;
                         // BinanceMakeOrder(curl, body);
                         fputs(strcat(body, "\n"), outputFile);
@@ -275,18 +350,33 @@ main()
             {
                 printf("Guilty! No need to close, time not out\n");
             }
-            else if (posnType == LONG && !(sellPressure > 2 * buyPressure))
+            else if (posnType == LONG &&
+                     !(sellPressure > 2 * buyPressure && 
+                     ((state.startPrice - lastPrice) > 0.5)) &&
+                     (state.timeToClose * 2 < MAX_TIME_PERIOD))
             {
                 printf("Guilty! No need to close, long pressure not reversed, so Load up!\n");
                 printf("Loading the position at lastPrice %f\n", lastPrice);
                 char body[300];
-                sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+                Trade trade = {};
+                real64 qty = 0.1;
+                trade.qty = qty;
+                trade.price = lastPrice;
+                trade.side = BUY;
+                position.qty += qty;
+                position.price = lastPrice;
+                wallet.coin += qty;
+                wallet.usdt -= qty * lastPrice;
+
+                // make the order call.
+                sprintf(body, "%lu, %s, %s, %f, %f, %f, %f",
+                        formatMSTimestamp(endTime),
                         "SOLUSDT",
-                        "SELL",
-                        "MARKET",
-                        0.1,
-                        endTime);
-                printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+                        "BUY",
+                        lastPrice,
+                        qty,
+                        position.qty * position.price,
+                        0.0);
                 // BinanceMakeOrder(curl, body);
                 fputs(strcat(body, "\n"), outputFile);
                 state.startPrice = lastPrice;
@@ -295,18 +385,33 @@ main()
                 state.sellPressure = 0.0;
                 state.timeToClose *= 2;
             }
-            else if (posnType == SHORT && !(buyPressure > 2 * sellPressure))
+            else if (posnType == SHORT &&
+                     !(buyPressure > 2 * sellPressure && 
+                     ((lastPrice - state.startPrice) > 0.5)) &&
+                     (state.timeToClose * 2 < MAX_TIME_PERIOD))
             {
                 printf("Guilty! No need to close, short pressure not reversed, so Load up!\n");
                 printf("Loading the position at lastPrice %f\n", lastPrice);
                 char body[300];
-                sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+                Trade trade = {};
+                real64 qty = -0.1;
+                trade.qty = qty;
+                trade.price = lastPrice;
+                trade.side = SELL;
+                position.qty += qty;
+                position.price = lastPrice;
+                wallet.coin += qty;
+                wallet.usdt -= qty * lastPrice;
+
+                // make the order call.
+                sprintf(body, "%lu, %s, %s, %f, %f, %f, %f",
+                        formatMSTimestamp(endTime),
                         "SOLUSDT",
                         "SELL",
-                        "MARKET",
-                        0.1,
-                        endTime);
-                printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+                        lastPrice,
+                        qty,
+                        position.qty * position.price,
+                        0.0); 
                 // BinanceMakeOrder(curl, body);
                 fputs(strcat(body, "\n"), outputFile);
                 state.startPrice = lastPrice;
@@ -315,27 +420,58 @@ main()
                 state.sellPressure = 0.0;
                 state.timeToClose *= 2;
             }
-            else // will only close now when the pressure's have reversed.
-        {
+            else // will only close now when the pressure's have reversed or
+                 // max holding period's crossed.
+            {
                 printf("closing the position at lastPrice %f\n", lastPrice);
                 char body[300];
                 if (posnType == LONG)
                 {
-                    sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+                    Trade trade = {};
+                    real64 currPosValue = position.qty * lastPrice;
+                    real64 prevPosValue = position.qty * position.price;
+                    real64 qty = -position.qty;
+                    trade.qty = qty;
+                    trade.price = lastPrice;
+                    trade.side = SELL;
+                    position.qty += qty;
+                    position.price = lastPrice;
+                    wallet.coin += qty;
+                    wallet.usdt -= qty * lastPrice;
+
+                    // make the order call.
+                    sprintf(body, "%lu, %s, %s, %f, %f, %f, %f",
+                            formatMSTimestamp(endTime),
                             "SOLUSDT",
                             "SELL",
-                            "MARKET",
-                            0.1,
-                            endTime);
+                            lastPrice,
+                            qty,
+                            position.qty * position.price,
+                            currPosValue - prevPosValue); 
                 }
                 else if (posnType == SHORT)
                 {
-                    sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+                    Trade trade = {};
+                    real64 currPosValue = position.qty * lastPrice;
+                    real64 prevPosValue = position.qty * position.price;
+                    real64 qty = -position.qty;
+                    trade.qty = qty;
+                    trade.price = lastPrice;
+                    trade.side = BUY;
+                    position.qty += qty;
+                    position.price = lastPrice;
+                    wallet.coin += qty;
+                    wallet.usdt -= qty * lastPrice;
+
+                    // make the order call.
+                    sprintf(body, "%lu, %s, %s, %f, %f, %f, %f",
+                            formatMSTimestamp(endTime),
                             "SOLUSDT",
                             "BUY",
-                            "MARKET",
-                            0.1,
-                            endTime);
+                            lastPrice,
+                            qty,
+                            position.qty * position.price,
+                            currPosValue - prevPosValue); 
                 }
                 printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
                 // BinanceMakeOrder(curl, body);
