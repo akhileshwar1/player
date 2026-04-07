@@ -1224,7 +1224,7 @@ main()
     state.TradeEventsBuffer.currentWriteIndex = 0;
     state.buyPressure = 0.0;
     state.sellPressure = 0.0;
-    state.timeToRefresh = 2 * 60 * 1000;
+    state.timeToRefresh = 30 * 60 * 1000;
     Position position = {};
     position.symbol = "SOLUSDT";
     Wallet wallet = {};
