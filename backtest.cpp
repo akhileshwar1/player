@@ -51,6 +51,8 @@ typedef struct
     real64 timeToRefresh;
     real64 buyPressure;
     real64 sellPressure;
+    uint64 sellTrades;
+    uint64 buyTrades;
     uint64 lastTime;
     bool isOpen;
     bool AreEventsApplied;
@@ -87,7 +89,7 @@ typedef struct
 } Wallet;
 
 void
-LoadTradeEvent(Trade_event *trade, char *line, State *state)
+LoadTradeEvent(Trade_event *trade, char *line, State *state, FILE *printFile)
 {
     char *token;
     token = strtok(line, ",");
@@ -123,28 +125,33 @@ LoadTradeEvent(Trade_event *trade, char *line, State *state)
             }
         }
 
-        if (trade->bmaker)
-        {
-            state->sellPressure += trade->quantity;
-            printf("Sell pressure added to %f\n", state->sellPressure);
-        }
-        else
-        {
-            state->buyPressure += trade->quantity;
-            printf("Buy pressure added to %f\n", state->buyPressure);
-        }
         token = strtok(NULL, ",");
         i++;
+    }
+
+    if (trade->bmaker)
+    {
+        state->sellPressure += trade->quantity;
+        state->sellTrades++;
+        fprintf(printFile, "Sell pressure added to %f\n", state->sellPressure);
+    }
+    else
+    {
+        state->buyPressure += trade->quantity;
+        state->buyTrades++;
+        fprintf(printFile, "Buy pressure added to %f\n", state->buyPressure);
     }
 }
 
 void
-PrintTradeState(State *state)
+PrintTradeState(State *state, FILE *printFile)
 {
-    printf("FORCES===================\n");
-    printf("START PRICE %f\n", state->startPrice); 
-    printf("SELL PRESSURE %f\n", state->sellPressure); 
-    printf("BUY PRESSURE %f\n", state->buyPressure); 
+    fprintf(printFile, "FORCES===================\n");
+    fprintf(printFile, "START PRICE %f\n", state->startPrice); 
+    fprintf(printFile, "SELL PRESSURE %f\n", state->sellPressure); 
+    fprintf(printFile, "BUY PRESSURE %f\n", state->buyPressure); 
+    fprintf(printFile, "SELL COUNT %lu\n", state->sellTrades); 
+    fprintf(printFile, "BUY COUNT %lu\n", state->buyTrades); 
 }
 
 void
@@ -164,9 +171,9 @@ BufferTradeEvent(Trade_event tradeEvent, Trade_events_buffer *tradeEventsBuffer)
 }
 
 void
-formatMSTimestamp(uint64 ms_timestamp, char *out_buf, size_t buf_sz) {
-    time_t seconds = ms_timestamp / 1000;
-    int millis = ms_timestamp % 1000;
+formatMSTimestamp(uint64_t us_timestamp, char *out_buf, size_t buf_sz) {
+    time_t seconds = us_timestamp / 1000000;
+    int millis = (us_timestamp % 1000000) / 1000;
 
     struct tm *tm_info = gmtime(&seconds);
     if (!tm_info) {
@@ -183,13 +190,13 @@ formatMSTimestamp(uint64 ms_timestamp, char *out_buf, size_t buf_sz) {
 int
 main()
 {
-    FILE *myFile = fopen("data0206.csv", "r");
+    FILE *myFile = fopen("data0404.csv", "r");
     if (myFile == NULL)
     {
         printf("Couldn't open file\n");
         return -1;
     }
-    FILE *outputFile = fopen("output0206.txt", "w");
+    FILE *outputFile = fopen("output0404.csv", "w");
     setbuf(outputFile, NULL); // Disables buffering completely
     if (outputFile == NULL)
     {
@@ -197,6 +204,13 @@ main()
         return -1;
     }
 
+    FILE *printFile = fopen("print0404.txt", "w");
+    setbuf(printFile, NULL); // Disables buffering completely
+    if (printFile == NULL)
+    {
+        printf("Couldn't open file\n");
+        return -1;
+    }
     fputs("id, Timestamp, symbol, side, price, qty, curr_value, usdt_after_fee, qty_after_fee, pnl\n", outputFile);
     char line[1024];
     State state = {};
@@ -204,7 +218,9 @@ main()
     state.TradeEventsBuffer.currentWriteIndex = 0;
     state.buyPressure = 0.0;
     state.sellPressure = 0.0;
-    state.timeToRefresh = 30 * 60 * 1000;
+    state.buyTrades = 0;
+    state.sellTrades = 0;
+    state.timeToRefresh = 30 * 60 * 1000 * 1000;
     Position position = {};
     position.symbol = "SOLUSDT";
     Wallet wallet = {};
@@ -216,18 +232,23 @@ main()
         if (tmp) *tmp = '\0';
 
         Trade_event trade = {};
-        LoadTradeEvent(&trade, line, &state);
+        LoadTradeEvent(&trade, line, &state, printFile);
         BufferTradeEvent(trade, &(state.TradeEventsBuffer));
         real64 buyPressure = state.buyPressure;
         real64 sellPressure = state.sellPressure;
+        uint64 buyTrades = state.buyTrades;
+        uint64 sellTrades = state.sellTrades;
         real64 lastPrice = state. 
             TradeEventsBuffer.
             buffer[MAX_EVENTS - 1].price;
         char time_str[32];
+        fprintf(printFile, "last price is %f\n", lastPrice);
         if ( !state.isOpen &&
             lastPrice != 0.0)
         {
             uint64 endTime = trade.time;
+            formatMSTimestamp(endTime, time_str, sizeof(time_str));
+            fprintf(printFile, "time is %s\n", time_str);
             real64 timeElapsedMS = endTime - state.lastTime;
 
             if (timeElapsedMS > state.timeToRefresh)
@@ -236,13 +257,15 @@ main()
                 state.lastTime = endTime;
                 state.buyPressure = 0.0;
                 state.sellPressure = 0.0;
+                state.buyTrades = 0;
+                state.sellTrades = 0;
             }
 
-            printf("start price is %f\n", state.startPrice);
+            fprintf(printFile, "start price is %f\n", state.startPrice);
 
             if (abs((lastPrice - state.startPrice)) < 0.5)
             {
-                printf("Guilty! There is no price movement\n");
+                fprintf(printFile, "Guilty! There is no price movement\n");
             }
             else
             {
@@ -251,15 +274,19 @@ main()
                 {
                     if (buyPressure < 2 * sellPressure)
                     {
-                        printf("Guilty! Not enough pressure on buy side\n");
+                        fprintf(printFile, "Guilty! Not enough pressure on buy side\n");
                     }
-                    else if (timeElapsedMS < 25 * 60 * 1000)
+                    // else if (buyTrades > 1.5 * sellTrades)
+                    // {
+                    //     fprintf(printFile, "Guilty! Many buy members around it\n");
+                    // }
+                    else if (timeElapsedMS < 25 * 60 * 1000 * 1000)
                     {
-                        printf("Guilty! Too fast, need real slow and steady!\n");
+                        fprintf(printFile, "Guilty! Too fast, need real slow and steady!\n");
                     }
                     else
                     {
-                        printf("opening the position after %f at lastPrice %f\n",
+                        fprintf(printFile, "opening the position after %f at lastPrice %f\n",
                                timeElapsedMS,
                                lastPrice);
                         Trade trade = {};
@@ -294,21 +321,27 @@ main()
                         state.isOpen = true;
                         state.buyPressure = 0.0;
                         state.sellPressure = 0.0;
+                        state.buyTrades = 0;
+                        state.sellTrades = 0;
                     }
                 }
                 else
                 {
                     if (sellPressure < 2 * buyPressure)
                     {
-                        printf("Guilty! Not enough pressure on sell side\n");
+                        fprintf(printFile, "Guilty! Not enough pressure on sell side\n");
                     }
-                    else if (timeElapsedMS < 25 * 60 * 1000)
+                    // else if (sellTrades > 1.5 * buyTrades)
+                    // {
+                    //     fprintf(printFile, "Guilty! Many sell members around it\n");
+                    // }
+                    else if (timeElapsedMS < 25 * 60 * 1000 * 1000)
                     {
-                        printf("Guilty! Too fast, need real slow and steady!\n");
+                        fprintf(printFile, "Guilty! Too fast, need real slow and steady!\n");
                     }
                     else
                     {
-                        printf("opening the position after %f at lastPrice %f\n",
+                        fprintf(printFile, "opening the position after %f at lastPrice %f\n",
                                timeElapsedMS,
                                lastPrice);
                         Trade trade = {};
@@ -343,6 +376,8 @@ main()
                         state.isOpen = true;
                         state.buyPressure = 0.0;
                         state.sellPressure = 0.0;
+                        state.buyTrades = 0;
+                        state.sellTrades = 0;
                     }
                 }
             }
@@ -355,19 +390,22 @@ main()
             uint64 endTime = trade.time;
             real64 timeElapsedMS = endTime - state.lastTime;
             Posn_type posnType = state.posnType;
-            printf("position is open, remaining time %f\n",
+            fprintf(printFile, "position is open, remaining time %f\n",
                    state.timeToClose - timeElapsedMS);
 
-            if (timeElapsedMS < state.timeToClose)
+            if (timeElapsedMS < state.timeToClose &&
+                ((posnType == LONG && ((lastPrice - position.price) * position.qty) > -0.05) ||
+                 (posnType == SHORT && ((lastPrice - position.price) * position.qty) > -0.05)))
             {
-                printf("Guilty! No need to close, time not out\n");
+                fprintf(printFile, "Guilty! No need to close, time not out and loss in check %f\n",
+                        (lastPrice - state.startPrice) * position.qty);
             }
             else if (posnType == LONG &&
                      (buyPressure > 2 * sellPressure && 
                      ((state.startPrice - lastPrice) > 0.5)) &&
                      (state.timeToClose * 2 < MAX_TIME_PERIOD))
             {
-                printf("Guilty!, Loading the position at lastPrice %f\n", lastPrice);
+                fprintf(printFile, "Guilty!, Loading the position at lastPrice %f\n", lastPrice);
                 char body[300];
                 Trade trade = {};
                 real64 qty = 0.1;
@@ -400,6 +438,8 @@ main()
                 state.lastTime = endTime;
                 state.buyPressure = 0.0;
                 state.sellPressure = 0.0;
+                state.buyTrades = 0;
+                state.sellTrades = 0;
                 state.timeToClose *= 2;
 
             }
@@ -408,7 +448,7 @@ main()
                 ((state.startPrice - lastPrice) > 0.5)) &&
                 (state.timeToClose * 2 < MAX_TIME_PERIOD))
             {
-                printf("Guilty!, Loading the position at lastPrice %f\n", lastPrice);
+                fprintf(printFile, "Guilty!, Loading the position at lastPrice %f\n", lastPrice);
                 char body[300];
                 Trade trade = {};
                 real64 qty = -0.1;
@@ -441,12 +481,14 @@ main()
                 state.lastTime = endTime;
                 state.buyPressure = 0.0;
                 state.sellPressure = 0.0;
+                state.buyTrades = 0;
+                state.sellTrades = 0;
                 state.timeToClose *= 2;
             }
             else // will only close now when the pressure's have reversed or
                  // time's up.
             {
-                printf("closing the position at lastPrice %f\n", lastPrice);
+                fprintf(printFile, "closing the position at lastPrice %f\n", lastPrice);
                 char body[300];
                 if (posnType == LONG)
                 {
@@ -508,7 +550,7 @@ main()
                             trade.qtyAfterFee,
                             currPosValue - prevPosValue); 
                 }
-                printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+                fprintf(printFile, "body is %s, api key is %s\n", body, getenv("API_KEY"));
                 // BinanceMakeOrder(curl, body);
                 fputs(strcat(body, "\n"), outputFile);
                 state.posnType = ZERO;
@@ -517,9 +559,11 @@ main()
                 state.lastTime = endTime;
                 state.buyPressure = 0.0;
                 state.sellPressure = 0.0;
+                state.buyTrades = 0;
+                state.sellTrades = 0;
             }
         }
-        PrintTradeState(&state);
+        PrintTradeState(&state, printFile);
     }
 
     fclose(myFile);
