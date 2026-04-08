@@ -122,7 +122,7 @@ typedef struct
     char *event;
     Market_events_buffer MarketEventsBuffer;
     Trade_events_buffer TradeEventsBuffer;
-    Snapshot Snapshot;
+    Snapshot snapshot;
     Order_book OrderBook;
     real64 startPrice;
     real64 timeToClose;
@@ -1098,8 +1098,8 @@ void
 SetOrderBook(State *state)
 {
     Order_book *OrderBook = &state->OrderBook;
-    Snapshot *Snapshot = &state->Snapshot;
-    char *input = (char *)Snapshot->resp;
+    Snapshot *snapshot = &state->snapshot;
+    char *input = (char *)snapshot->resp;
     yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
     yyjson_val *root = yyjson_doc_get_root(doc);
     yyjson_val *id = yyjson_obj_get(root, "lastUpdateId");

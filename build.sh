@@ -2,7 +2,7 @@
 set -e
 
 # Build platform executable.
-clang \
+gcc \
     -g -O0 \
     -Wall -Wextra \
     -fsanitize=address \
