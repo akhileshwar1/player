@@ -658,8 +658,25 @@ CallbackBinanceTrade(struct lws *wsi,
                 FILE *outputFile = ((State *)user)->outputFile;
                 State state = *((State *)user);
                 Trade_event tradeEvent = {};
-                LoadTradeEvent(&tradeEvent, (char *)in, (State *)user);
-                BufferTradeEvent(tradeEvent, &((State *)user)->TradeEventsBuffer);
+                yyjson_doc *doc = IsEventComplete((char *)in);
+                if (doc == NULL)
+                {
+                    ((State *)user)->event = StringCat(((State *)user)->event, (char *)in);
+                }
+                else
+                {
+                    LoadTradeEvent(&tradeEvent, (char *)in, (State *)user);
+                    BufferTradeEvent(tradeEvent, &((State *)user)->TradeEventsBuffer);
+                }
+
+                doc = IsEventComplete(((State *)user)->event); 
+                if (doc != NULL)
+                {
+                    printf("NOT null anymore %s\n", ((State *)user)->event);
+                    LoadTradeEvent(&tradeEvent, (char *)in, (State *)user);
+                    BufferTradeEvent(tradeEvent, &((State *)user)->TradeEventsBuffer);
+                    ((State *)user)->event = "";
+                }
                 real64 buyPressure = ((State *)user)->buyPressure;
                 real64 sellPressure = ((State *)user)->sellPressure;
                 real64 lastPrice = ((State *)user)->
@@ -1233,7 +1250,7 @@ main()
     state.wallet = wallet;
     state.position = position;
     state.outputFile = outputFile;
-    lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_USER, NULL);
+    lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO | LLL_DEBUG, NULL); 
     printf("running\n");
     char *address = StringCat(MARKET_BASE_ENDP, STREAM_PATH);
     printf("address is %s\n", address);
