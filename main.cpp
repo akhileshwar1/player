@@ -139,6 +139,7 @@ typedef struct
     Position position;
     Wallet wallet;
     FILE *outputFile;
+    time_t lastTradeTime;
 } State;
 
 void formatMSTimestamp(uint64_t ms_timestamp, char *out_buf, size_t buf_sz) {
@@ -640,16 +641,18 @@ CallbackBinanceTrade(struct lws *wsi,
             printf("callback_binance: LWS_CALLBACK_CLIENT_ESTABLISHED\n");
             break;
 
-        case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-            printf("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
-            break;
-
         case LWS_CALLBACK_CLOSED:
             printf("LWS_CALLBACK_CLOSED\n");
             break;
 
+        case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+            printf("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
+            break;
+
         case LWS_CALLBACK_CLIENT_RECEIVE:
             {
+                ((State *)user)->lastTradeTime = time(NULL);
+                printf("trade time is\n");
                 ((char *)in)[len] = '\0';
                 printf("rx Trade %d '%s'\n", (int)len, (char *)in);
                 char time_str[32];
@@ -1355,6 +1358,20 @@ main()
         //     // apply the buffered events to the order book
         //     IgnoreAndApplyEvents(&state);
         // }
+
+        if (state.isPriceTaken && (time(NULL) - state.lastTradeTime > 10)) {
+            printf("No data — reconnecting\n");
+            fflush(stdout);
+
+            // destroy everything
+            lws_context_destroy(context);
+
+            // recreate
+            context = lws_create_context(&info);
+            lws_client_connect_via_info(&ccinfoTrade);
+
+            state.lastTradeTime = time(NULL);
+        } 
 
         // apply the event to the order book in the callback, if the OB is ready.
         lws_service(context, 0);
