@@ -1362,12 +1362,21 @@ main()
             printf("No data — reconnecting\n");
             fflush(stdout);
 
-            // destroy everything
             lws_context_destroy(context);
 
-            // recreate
             context = lws_create_context(&info);
-            lws_client_connect_via_info(&ccinfoTrade);
+            if (context == NULL)
+            {
+                printf("Couldn't create context\n");
+                return -1;
+            }
+
+            lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
+            if (lwsTrade == NULL)
+            {
+                printf("Connection failed\n");
+                return -1;
+            }
 
             state.lastTradeTime = time(NULL);
             state.isPriceTaken = false;
