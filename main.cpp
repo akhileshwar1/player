@@ -652,7 +652,6 @@ CallbackBinanceTrade(struct lws *wsi,
         case LWS_CALLBACK_CLIENT_RECEIVE:
             {
                 ((State *)user)->lastTradeTime = time(NULL);
-                printf("trade time is\n");
                 ((char *)in)[len] = '\0';
                 printf("rx Trade %d '%s'\n", (int)len, (char *)in);
                 char time_str[32];
@@ -1371,6 +1370,7 @@ main()
             lws_client_connect_via_info(&ccinfoTrade);
 
             state.lastTradeTime = time(NULL);
+            state.isPriceTaken = false;
         } 
 
         // apply the event to the order book in the callback, if the OB is ready.
