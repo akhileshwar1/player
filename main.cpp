@@ -1112,7 +1112,7 @@ main()
         //     IgnoreAndApplyEvents(&state);
         // }
 
-        if (state.isPriceTaken && (time(NULL) - state.lastTradeTime > 10)) {
+        if ((time(NULL) - state.lastTradeTime > 10)) {
             printf("No data — reconnecting\n");
             fflush(stdout);
 
@@ -1124,7 +1124,6 @@ main()
             }
 
             state.lastTradeTime = time(NULL);
-            state.isPriceTaken = false;
         } 
 
         if (state.shouldPlaceOrder)
