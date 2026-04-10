@@ -1116,16 +1116,7 @@ main()
             printf("No data — reconnecting\n");
             fflush(stdout);
 
-            lws_context_destroy(context);
-
-            context = lws_create_context(&info);
-            if (context == NULL)
-            {
-                printf("Couldn't create context\n");
-                return -1;
-            }
-
-            lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
+            lwsTrade = lws_client_connect_via_info(&ccinfoTrade); 
             if (lwsTrade == NULL)
             {
                 printf("Connection failed\n");
