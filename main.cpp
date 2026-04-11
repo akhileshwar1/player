@@ -810,13 +810,13 @@ CallbackBinanceTrade(struct lws *wsi,
                         printf("closing the position at lastPrice %f\n", lastPrice);
                         if (posnType == LONG)
                         {
-                            state->shouldPlaceOrder == true;
-                            state->orderType == CLOSELONG;
+                            state->shouldPlaceOrder = true;
+                            state->orderType = CLOSELONG;
                         }
                         else if (posnType == SHORT)
                         {
-                            state->shouldPlaceOrder == true;
-                            state->orderType == CLOSESHORT;
+                            state->shouldPlaceOrder = true;
+                            state->orderType = CLOSESHORT;
                         }
                     }
                 }
