@@ -669,20 +669,24 @@ CallbackBinanceTrade(struct lws *wsi,
             {
                 State *state = ((State *)user);
                 state->lastTradeTime = time(NULL);
-                ((char *)in)[len] = '\0';
-                printf("rx Trade %d '%s'\n", (int)len, (char *)in);
+                Assert(len <= 4096)
+                char buf[4096];
+                memcpy(buf, in, len);
+                buf[len] = '\0';
+                // ((char *)in)[len] = '\0';
+                printf("rx Trade %d '%s'\n", (int)len, buf);
                 Position position = state->position;
                 Wallet wallet = state->wallet;
                 FILE *outputFile = state->outputFile;
                 Trade_event tradeEvent = {};
-                yyjson_doc *doc = IsEventComplete((char *)in);
+                yyjson_doc *doc = IsEventComplete(buf);
                 if (doc == NULL)
                 {
-                    state->event = StringCat(state->event, (char *)in);
+                    state->event = StringCat(state->event, buf);
                 }
                 else
                 {
-                    LoadTradeEvent(&tradeEvent, (char *)in, (State *)user);
+                    LoadTradeEvent(&tradeEvent, buf, (State *)user);
                     BufferTradeEvent(tradeEvent, &state->TradeEventsBuffer);
                 }
 
@@ -690,7 +694,7 @@ CallbackBinanceTrade(struct lws *wsi,
                 if (doc != NULL)
                 {
                     printf("NOT null anymore %s\n", state->event);
-                    LoadTradeEvent(&tradeEvent, (char *)in, state);
+                    LoadTradeEvent(&tradeEvent, buf, state);
                     BufferTradeEvent(tradeEvent, &state->TradeEventsBuffer);
                     state->event = "";
                 }
