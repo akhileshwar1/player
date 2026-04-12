@@ -972,6 +972,8 @@ IgnoreAndApplyEvents(State *state)
 int
 main()
 {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     CURLcode res = curl_global_init(CURL_GLOBAL_ALL);
     if (res != CURLE_OK) {
         printf("curl setup failed, abort!");
