@@ -580,15 +580,19 @@ CallbackBinance(struct lws *wsi,
 
         case LWS_CALLBACK_CLIENT_RECEIVE:
             {
-                ((char *)in)[len] = '\0';
-                printf("rx %d '%s'\n", (int)len, (char *)in);
+                // ((char *)in)[len] = '\0';
+                Assert(len <= 4096)
+                char buf[4096];
+                memcpy(buf, in, len);
+                buf[len] = '\0';
+                printf("rx %d '%s'\n", (int)len, buf);
                 Market_event marketEvent = {};
                 // TODO(Akhil): There's a double copy happening here,
                 //              could be simpler.
-                yyjson_doc *doc = IsEventComplete((char *)in);
+                yyjson_doc *doc = IsEventComplete(buf);
                 if (doc == NULL)
                 {
-                    ((State *)user)->event = StringCat(((State *)user)->event, (char *)in);
+                    ((State *)user)->event = StringCat(((State *)user)->event, buf);
                 }
                 else
                 {
