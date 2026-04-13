@@ -259,18 +259,18 @@ AddLevelsToEvent(yyjson_val *val, quote *quotes)
     }
 }
 
-yyjson_doc
-*IsEventComplete(char *input)
+bool
+IsEventComplete(char *input)
 {
     yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
     yyjson_val *root = yyjson_doc_get_root(doc);
     yyjson_val *e = yyjson_obj_get(root, "e");
+    yyjson_doc_free(doc);
     if (e == NULL)
     {
-        yyjson_doc_free(doc);
-        return NULL;
+        return false;
     }
-    else return doc;
+    else return true;
 }
 
 void
@@ -596,35 +596,33 @@ CallbackBinance(struct lws *wsi,
         case LWS_CALLBACK_CLIENT_RECEIVE:
             {
                 // ((char *)in)[len] = '\0';
-                State *state = ((State *)user);
-                Assert(len <= 4096)
-                char buf[4096];
-                memcpy(buf, in, len);
-                buf[len] = '\0';
-                printf("rx %d '%s'\n", (int)len, buf);
-                Market_event marketEvent = {};
-                // TODO(Akhil): There's a double copy happening here,
-                //              could be simpler.
-                yyjson_doc *doc = IsEventComplete(buf);
-                if (doc == NULL)
-                {
-                    Assert(StringLength(state->event) + StringLength(buf) < 4096)
-                    StringCat(state->event, buf);
-                }
-                else
-                {
-                    LoadBufferAndApplyEvent(marketEvent, (State *)user, doc);
-                }
-
-                doc = IsEventComplete(((State *)user)->event); 
-                if (doc != NULL)
-                {
-                    printf("NOT null anymore %s\n", ((State *)user)->event);
-                    LoadBufferAndApplyEvent(marketEvent, (State *)user, doc);
-                    memset(state->event, 0, sizeof(state->event));
-                }
-                // Avoid memory leaks.
-                yyjson_doc_free(doc);
+                // State *state = ((State *)user);
+                // Assert(len <= 4096)
+                // char buf[4096];
+                // memcpy(buf, in, len);
+                // buf[len] = '\0';
+                // printf("rx %d '%s'\n", (int)len, buf);
+                // Market_event marketEvent = {};
+                // // TODO(Akhil): There's a double copy happening here,
+                // //              could be simpler.
+                // bool isComplete = IsEventComplete(buf);
+                // if (!isComplete)
+                // {
+                //     Assert(StringLength(state->event) + StringLength(buf) < 4096)
+                //     StringCat(state->event, buf);
+                // }
+                // else
+                // {
+                //     LoadBufferAndApplyEvent(marketEvent, (State *)user, doc);
+                // }
+                //
+                // isComplete = IsEventComplete(((State *)user)->event); 
+                // if (isComplete)
+                // {
+                //     printf("NOT null anymore %s\n", ((State *)user)->event);
+                //     LoadBufferAndApplyEvent(marketEvent, (State *)user, doc);
+                //     memset(state->event, 0, sizeof(state->event));
+                // }
                 break;
             }
 
@@ -636,7 +634,7 @@ CallbackBinance(struct lws *wsi,
 
 void
 LoadTradeEvent(Trade_event *trade, char *input, State *state)
-{
+{   
     yyjson_doc *doc = yyjson_read(input , StringLength(input), 0);
     yyjson_val *root = yyjson_doc_get_root(doc);
     yyjson_val *e = yyjson_obj_get(root, "e");
@@ -663,6 +661,7 @@ LoadTradeEvent(Trade_event *trade, char *input, State *state)
         state->buyPressure += trade->quantity;
         printf("Buy pressure added to %f\n", state->buyPressure);
     }
+    yyjson_doc_free(doc);
 }
 
 int
@@ -698,8 +697,8 @@ CallbackBinanceTrade(struct lws *wsi,
                 Wallet wallet = state->wallet;
                 FILE *outputFile = state->outputFile;
                 Trade_event tradeEvent = {};
-                yyjson_doc *doc = IsEventComplete(buf);
-                if (doc == NULL)
+                bool isComplete = IsEventComplete(buf);
+                if (!isComplete)
                 {
                     Assert(StringLength(state->event) + StringLength(buf) < 4096)
                     StringCat(state->event, buf);
@@ -710,8 +709,8 @@ CallbackBinanceTrade(struct lws *wsi,
                     BufferTradeEvent(tradeEvent, &state->TradeEventsBuffer);
                 }
 
-                doc = IsEventComplete(state->event); 
-                if (doc != NULL)
+                isComplete = IsEventComplete(state->event); 
+                if (isComplete)
                 {
                     printf("NOT null anymore %s\n", state->event);
                     LoadTradeEvent(&tradeEvent, buf, state);
@@ -848,8 +847,6 @@ CallbackBinanceTrade(struct lws *wsi,
                         }
                     }
                 }
-                // Avoid memory leaks.
-                yyjson_doc_free(doc);
                 break;
             }
 
