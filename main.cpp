@@ -265,7 +265,11 @@ yyjson_doc
     yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
     yyjson_val *root = yyjson_doc_get_root(doc);
     yyjson_val *e = yyjson_obj_get(root, "e");
-    if (e == NULL) return NULL;
+    if (e == NULL)
+    {
+        yyjson_doc_free(doc);
+        return NULL;
+    }
     else return doc;
 }
 
@@ -702,7 +706,7 @@ CallbackBinanceTrade(struct lws *wsi,
                 }
                 else
                 {
-                    LoadTradeEvent(&tradeEvent, buf, (State *)user);
+                    LoadTradeEvent(&tradeEvent, buf, state);
                     BufferTradeEvent(tradeEvent, &state->TradeEventsBuffer);
                 }
 
@@ -1168,7 +1172,7 @@ main()
                     TradeEventsBuffer.
                     buffer[MAX_EVENTS - 1].price;
             uint64 timestamp = BinanceTimestamp();
-            char body[300];
+            char body[900];
             char time_str[32];
             if (state.orderType == OPENBUY)
             {
@@ -1209,7 +1213,7 @@ main()
                             trade.usdtAfterFee,
                             trade.qtyAfterFee,
                             0.0);
-                    fputs(strcat(body, "\n"), outputFile);
+                    fputs(StringCat(body, "\n"), outputFile);
                     state.posnType = LONG;
                     state.timeToClose = timeElapsedMS;
                     state.lastTime = endTime;
@@ -1258,7 +1262,7 @@ main()
                             trade.usdtAfterFee,
                             trade.qtyAfterFee,
                             0.0);
-                    fputs(strcat(body, "\n"), outputFile);
+                    fputs(StringCat(body, "\n"), outputFile);
                     state.posnType = SHORT;
                     state.timeToClose = timeElapsedMS;
                     state.lastTime = endTime;
@@ -1302,7 +1306,7 @@ main()
                             trade.usdtAfterFee,
                             trade.qtyAfterFee,
                             0.0);
-                    fputs(strcat(body, "\n"), outputFile);
+                    fputs(StringCat(body, "\n"), outputFile);
                     state.startPrice = lastPrice;
                     state.lastTime = endTime;
                     state.buyPressure = 0.0;
@@ -1346,7 +1350,7 @@ main()
                             trade.usdtAfterFee,
                             trade.qtyAfterFee,
                             0.0); 
-                    fputs(strcat(body, "\n"), outputFile);
+                    fputs(StringCat(body, "\n"), outputFile);
                     state.startPrice = lastPrice;
                     state.lastTime = endTime;
                     state.buyPressure = 0.0;
@@ -1390,7 +1394,7 @@ main()
                             trade.usdtAfterFee,
                             trade.qtyAfterFee,
                             currPosValue - prevPosValue);
-                    fputs(strcat(body, "\n"), outputFile);
+                    fputs(StringCat(body, "\n"), outputFile);
                     state.posnType = ZERO;
                     state.isOpen = false;
                     state.startPrice = lastPrice;
@@ -1435,7 +1439,7 @@ main()
                             trade.usdtAfterFee,
                             trade.qtyAfterFee,
                             currPosValue - prevPosValue);
-                    fputs(strcat(body, "\n"), outputFile);
+                    fputs(StringCat(body, "\n"), outputFile);
                     state.posnType = ZERO;
                     state.isOpen = false;
                     state.startPrice = lastPrice;
