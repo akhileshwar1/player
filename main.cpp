@@ -6,6 +6,7 @@
 #include <curl/curl.h>
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
+#include <malloc.h>
 
 #define ArrayCount(Array) (sizeof(Array) / sizeof(Array[0]))
 #define Assert(Expression) if(!(Expression)) {*(int *)0 = 0;}
@@ -1108,6 +1109,7 @@ main()
         return -1;
     }
 
+    uint16 loopcount = 0;
     while(1)
     {
         // if (state.MarketEventsBuffer.currentWriteIndex > 0 &&
@@ -1146,6 +1148,11 @@ main()
         //     // apply the buffered events to the order book
         //     IgnoreAndApplyEvents(&state);
         // }
+
+        if (loopcount % 1000 == 0) {
+            malloc_trim(0); 
+            loopcount = 0;
+        }
 
         if ((time(NULL) - state.lastTradeTime > 10)) {
             printf("No data — reconnecting\n");
@@ -1460,6 +1467,7 @@ main()
 
         // PrintOrderBook(&state);
         PrintTradeState(&state);
+        loopcount++;
     }
 
 
