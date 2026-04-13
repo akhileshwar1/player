@@ -145,7 +145,6 @@ typedef struct
     bool AreEventsApplied;
     bool isSnapshot;
     bool isPriceTaken;
-    CURL *curl;
     Posn_type posnType; 
     Position position;
     Wallet wallet;
@@ -533,50 +532,53 @@ void generate_signature(const char* query, const char* secret, char* out_hex) {
     }
 }
 
-bool
-BinanceMakeOrder(CURL *curl, char *body)
-{
+bool BinanceMakeOrder(char *body) {
+    CURL *curl = curl_easy_init(); // Fresh handle
+    if(!curl) return false;
     curl_easy_reset(curl);
-    char signed_body[2048];
-    char signature[65]; // 64 hex chars + null terminator
 
+    char signed_body[2048];
+    char signature[65];
     struct curl_slist *headers = NULL;
+
     char key_header[128];
     snprintf(key_header, sizeof(key_header), "X-MBX-APIKEY: %s", getenv("API_KEY"));
     headers = curl_slist_append(headers, key_header);
+
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
-    // Generate the hex signature from the current body
-    char *secret = getenv("API_SECRET");
-    generate_signature(body, getenv("API_SECRET"), signature);
 
-    // Combine the body and the signature
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](void* ptr, size_t size, size_t nmemb, void* data) {
+        return size * nmemb; // Just tell curl we "consumed" the data
+    });
+
+    generate_signature(body, getenv("API_SECRET"), signature);
     snprintf(signed_body, sizeof(signed_body), "%s&signature=%s", body, signature);
-    printf("signed body is %s\n", signed_body);
+
     char tradeUrl[1024];
     StringCpy(tradeUrl, TRADE_URL);
-    curl_easy_setopt(curl, CURLOPT_URL, StringCat(tradeUrl,
-                                                  signed_body));
-    CURLcode result = curl_easy_perform(curl);
-    curl_slist_free_all(headers);
-    long http_code = 0;
-    if (result == CURLE_OK) {
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 
+    // Be careful here: Ensure tradeUrl + signed_body < 1024
+    curl_easy_setopt(curl, CURLOPT_URL, StringCat(tradeUrl, signed_body));
+
+    CURLcode result = curl_easy_perform(curl);
+
+    // 3. Cleanup headers immediately
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    if (result == CURLE_OK) {
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
         if (http_code == 200) {
             printf("Success! Order placed.\n");
             return true;
-        } else {
-            printf("API Error! HTTP Status: %ld\n", http_code);
-            return false;
         }
-    }
-    else
-    {
+        printf("API Error! HTTP Status: %ld\n", http_code);
+    } else {
         printf("Transfer failed: %s\n", curl_easy_strerror(result));
-        return false;
     }
+
+    return false;
 }
 
 int
@@ -999,18 +1001,7 @@ main()
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
-    CURLcode res = curl_global_init(CURL_GLOBAL_ALL);
-    if (res != CURLE_OK) {
-        printf("curl setup failed, abort!");
-        return -1;
-    }
-
-    CURL *curl = curl_easy_init();
-    if (curl == NULL) {
-        printf("curl setup failed, abort!");
-        return -1;
-    }
-
+    
     FILE *outputFile = fopen("outputLive.csv", "w");
     setbuf(outputFile, NULL); // Disables buffering completely
     if (outputFile == NULL)
@@ -1021,7 +1012,6 @@ main()
 
     fputs("id, Timestamp, symbol, side, price, qty, curr_value, usdt_after_fee, qty_after_fee, pnl\n", outputFile);
     State state = {};
-    state.curl = curl;
     // state.event = "";
     state.isSnapshot = false;
     state.isPriceTaken = false;
@@ -1198,7 +1188,7 @@ main()
                         0.1,
                         timestamp);
                 printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
-                bool res = BinanceMakeOrder(curl, body);
+                bool res = BinanceMakeOrder(body);
                 if (res)
                 {
                     Trade trade = {};
@@ -1246,7 +1236,7 @@ main()
                         0.1,
                         timestamp);
                 printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
-                bool res = BinanceMakeOrder(curl, body);
+                bool res = BinanceMakeOrder(body);
                 if (res)
                 {
                     Trade trade = {};
@@ -1291,7 +1281,7 @@ main()
                         0.1,
                         timestamp);
                 printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
-                if (BinanceMakeOrder(curl, body))
+                if (BinanceMakeOrder(body))
                 {
                     Trade trade = {};
                     real64 qty = 0.1;
@@ -1334,7 +1324,7 @@ main()
                         0.1,
                         timestamp);
                 printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
-                if (BinanceMakeOrder(curl, body))
+                if (BinanceMakeOrder(body))
                 {
                     Trade trade = {};
                     real64 qty = -0.1;
@@ -1377,7 +1367,7 @@ main()
                         "MARKET",
                         0.1,
                         timestamp);
-                if (BinanceMakeOrder(curl, body))
+                if (BinanceMakeOrder(body))
                 {
                     Trade trade = {};
                     real64 currPosValue = position.qty * lastPrice;
@@ -1422,7 +1412,7 @@ main()
                         "MARKET",
                         0.1,
                         timestamp);
-                if (BinanceMakeOrder(curl, body))
+                if (BinanceMakeOrder(body))
                 {
                     Trade trade = {};
                     real64 currPosValue = position.qty * lastPrice;
