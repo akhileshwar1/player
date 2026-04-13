@@ -550,6 +550,7 @@ BinanceMakeOrder(CURL *curl, char *body)
     curl_easy_setopt(curl, CURLOPT_URL, StringCat(tradeUrl,
                                                   signed_body));
     CURLcode result = curl_easy_perform(curl);
+    curl_slist_free_all(headers);
     long http_code = 0;
     if (result == CURLE_OK) {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
@@ -845,6 +846,7 @@ CallbackBinanceTrade(struct lws *wsi,
                 }
                 // Avoid memory leaks.
                 yyjson_doc_free(doc);
+                break;
             }
 
         default:
