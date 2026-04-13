@@ -1150,7 +1150,9 @@ main()
         if ((time(NULL) - state.lastTradeTime > 10)) {
             printf("No data — reconnecting\n");
             fflush(stdout);
-
+            if (lwsTrade) {
+                lws_set_timeout(lwsTrade, PENDING_TIMEOUT_CLOSE_ACK, LWS_TO_KILL_ASYNC);
+            }
             lwsTrade = lws_client_connect_via_info(&ccinfoTrade); 
             if (lwsTrade == NULL)
             {
