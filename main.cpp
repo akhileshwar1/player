@@ -1151,8 +1151,14 @@ main()
             printf("No data — reconnecting\n");
             fflush(stdout);
             if (lwsTrade) {
+                // Mark for destruction
                 lws_set_timeout(lwsTrade, PENDING_TIMEOUT_CLOSE_ACK, LWS_TO_KILL_ASYNC);
-            }
+
+                // FORCE a service pass to finalize the destruction of the old wsi
+                lws_service(context, 0); 
+
+                lwsTrade = NULL; 
+            } 
             lwsTrade = lws_client_connect_via_info(&ccinfoTrade); 
             if (lwsTrade == NULL)
             {
