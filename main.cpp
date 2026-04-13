@@ -129,7 +129,7 @@ typedef enum
 typedef struct timespec timespec;
 typedef struct
 {
-    char *event;
+    char event[4096];
     Market_events_buffer MarketEventsBuffer;
     Trade_events_buffer TradeEventsBuffer;
     Snapshot snapshot;
@@ -189,22 +189,30 @@ StringLength(char *str)
     return length;
 }
 
-char 
-*StringCat(char *str1, char *str2)
+char
+*StringCpy(char *buffer, char *str2)
 {
-    uint32 length = StringLength(str1) + StringLength(str2) + 1;
-    printf("length is %u\n", length);
-    char *buffer = (char *)malloc(length*sizeof(char));
-    if (buffer == NULL)
-    {
-        free(buffer);
-        return NULL;
-    }
+    if (buffer == NULL) return NULL;
 
     char *ptr = buffer;
-    while (*str1 != '\0')
+    while (*str2 != '\0')
     {
-        *ptr++ = *str1++;
+        *ptr++ = *str2++;
+    }
+    *ptr = '\0';
+    return buffer;
+}
+
+char 
+*StringCat(char *buffer, char *str2)
+{
+    if (buffer == NULL) return NULL;
+
+    // iterate until the terminating byte to overwrite it below.
+    char *ptr = buffer;
+    while (*ptr != '\0')
+    {
+        ptr++;
     }
 
     while(*str2 != '\0')
@@ -537,7 +545,9 @@ BinanceMakeOrder(CURL *curl, char *body)
     // Combine the body and the signature
     snprintf(signed_body, sizeof(signed_body), "%s&signature=%s", body, signature);
     printf("signed body is %s\n", signed_body);
-    curl_easy_setopt(curl, CURLOPT_URL, StringCat(TRADE_URL,
+    char tradeUrl[1024];
+    StringCpy(tradeUrl, TRADE_URL);
+    curl_easy_setopt(curl, CURLOPT_URL, StringCat(tradeUrl,
                                                   signed_body));
     CURLcode result = curl_easy_perform(curl);
     long http_code = 0;
@@ -581,6 +591,7 @@ CallbackBinance(struct lws *wsi,
         case LWS_CALLBACK_CLIENT_RECEIVE:
             {
                 // ((char *)in)[len] = '\0';
+                State *state = ((State *)user);
                 Assert(len <= 4096)
                 char buf[4096];
                 memcpy(buf, in, len);
@@ -592,7 +603,8 @@ CallbackBinance(struct lws *wsi,
                 yyjson_doc *doc = IsEventComplete(buf);
                 if (doc == NULL)
                 {
-                    ((State *)user)->event = StringCat(((State *)user)->event, buf);
+                    Assert(StringLength(state->event) + StringLength(buf) < 4096)
+                    StringCat(state->event, buf);
                 }
                 else
                 {
@@ -604,8 +616,10 @@ CallbackBinance(struct lws *wsi,
                 {
                     printf("NOT null anymore %s\n", ((State *)user)->event);
                     LoadBufferAndApplyEvent(marketEvent, (State *)user, doc);
-                    ((State *)user)->event = "";
+                    memset(state->event, 0, sizeof(state->event));
                 }
+                // Avoid memory leaks.
+                yyjson_doc_free(doc);
                 break;
             }
 
@@ -682,7 +696,8 @@ CallbackBinanceTrade(struct lws *wsi,
                 yyjson_doc *doc = IsEventComplete(buf);
                 if (doc == NULL)
                 {
-                    state->event = StringCat(state->event, buf);
+                    Assert(StringLength(state->event) + StringLength(buf) < 4096)
+                    StringCat(state->event, buf);
                 }
                 else
                 {
@@ -696,7 +711,7 @@ CallbackBinanceTrade(struct lws *wsi,
                     printf("NOT null anymore %s\n", state->event);
                     LoadTradeEvent(&tradeEvent, buf, state);
                     BufferTradeEvent(tradeEvent, &state->TradeEventsBuffer);
-                    state->event = "";
+                    memset(state->event, 0, sizeof(state->event));
                 }
                 real64 buyPressure = state->buyPressure;
                 real64 sellPressure = state->sellPressure;
@@ -828,6 +843,8 @@ CallbackBinanceTrade(struct lws *wsi,
                         }
                     }
                 }
+                // Avoid memory leaks.
+                yyjson_doc_free(doc);
             }
 
         default:
@@ -997,7 +1014,7 @@ main()
     fputs("id, Timestamp, symbol, side, price, qty, curr_value, usdt_after_fee, qty_after_fee, pnl\n", outputFile);
     State state = {};
     state.curl = curl;
-    state.event = "";
+    // state.event = "";
     state.isSnapshot = false;
     state.isPriceTaken = false;
     state.shouldPlaceOrder = false;
@@ -1018,9 +1035,10 @@ main()
     state.outputFile = outputFile;
     lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO | LLL_DEBUG, NULL); 
     printf("running\n");
-    char *address = StringCat(MARKET_BASE_ENDP, STREAM_PATH);
+    char address[1024];
+    StringCpy(address, MARKET_BASE_ENDP);
+    StringCat(address, STREAM_PATH);
     printf("address is %s\n", address);
-    free(address);
     struct lws_context_creation_info info = {};
     info.port = CONTEXT_PORT_NO_LISTEN;
     info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT; // Crucial for SSL
