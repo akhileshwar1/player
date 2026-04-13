@@ -265,12 +265,16 @@ IsEventComplete(char *input)
     yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
     yyjson_val *root = yyjson_doc_get_root(doc);
     yyjson_val *e = yyjson_obj_get(root, "e");
-    yyjson_doc_free(doc);
     if (e == NULL)
     {
+        yyjson_doc_free(doc);
         return false;
     }
-    else return true;
+    else
+    {
+        yyjson_doc_free(doc);
+        return true;
+    }
 }
 
 void
