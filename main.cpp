@@ -547,8 +547,10 @@ bool BinanceMakeOrder(char *body) {
 
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
-
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 2L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](void* ptr, size_t size, size_t nmemb, void* data) {
+        printf("resp is %s\n", (char *)data);
         return size * nmemb; // Just tell curl we "consumed" the data
     });
 
@@ -563,9 +565,6 @@ bool BinanceMakeOrder(char *body) {
 
     CURLcode result = curl_easy_perform(curl);
 
-    // 3. Cleanup headers immediately
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
     if (result == CURLE_OK) {
         long http_code = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
@@ -578,6 +577,9 @@ bool BinanceMakeOrder(char *body) {
         printf("Transfer failed: %s\n", curl_easy_strerror(result));
     }
 
+    // 3. Cleanup headers immediately
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
     return false;
 }
 
