@@ -532,8 +532,19 @@ void generate_signature(const char* query, const char* secret, char* out_hex) {
     }
 }
 
+size_t
+writeDataBinanceOrder(void *buffer, size_t size, size_t nmemb, void *userp)
+{
+    printf("returned binance order\n");
+    size_t realsize = size * nmemb;
+    return realsize;
+}
+
 bool BinanceMakeOrder(char *body) {
     CURL *curl = curl_easy_init(); // Fresh handle
+    /* NOTE: THIS LINE BELOW IS IMP FOR THE CALL TO RETURN */
+    curl_easy_reset(curl);
+    printf("initialized curl \n");
     if(!curl) return false;
     curl_easy_reset(curl);
 
@@ -547,24 +558,26 @@ bool BinanceMakeOrder(char *body) {
 
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    /* NOTE: THIS LINE BELOW IS IMP FOR THE CALL TO RETURN */
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 2L);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](void* ptr, size_t size, size_t nmemb, void* data) {
-        printf("resp is %s\n", (char *)data);
-        return size * nmemb; // Just tell curl we "consumed" the data
-    });
+    // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeDataBinanceOrder);
 
     generate_signature(body, getenv("API_SECRET"), signature);
     snprintf(signed_body, sizeof(signed_body), "%s&signature=%s", body, signature);
 
     char tradeUrl[1024];
     StringCpy(tradeUrl, TRADE_URL);
+    StringCat(tradeUrl, signed_body);
+    printf("trade url is %s\n", tradeUrl);
 
     // Be careful here: Ensure tradeUrl + signed_body < 1024
-    curl_easy_setopt(curl, CURLOPT_URL, StringCat(tradeUrl, signed_body));
+    curl_easy_setopt(curl, CURLOPT_URL, tradeUrl);
 
     CURLcode result = curl_easy_perform(curl);
-
+    printf("initialized curl3 \n");
     if (result == CURLE_OK) {
         long http_code = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
@@ -902,6 +915,7 @@ write_data(void *buffer, size_t size, size_t nmemb, void *userp)
     return realsize;
 }
 
+
 // NOTE(Akhil): why void? can't the load fail? json wrong?
 void
 SetOrderBook(State *state)
@@ -1001,6 +1015,12 @@ IgnoreAndApplyEvents(State *state)
 int
 main()
 {
+    CURLcode res = curl_global_init(CURL_GLOBAL_ALL);
+    if (res != CURLE_OK) {
+        printf("curl setup failed, abort!");
+        return -1;
+    }
+
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     
