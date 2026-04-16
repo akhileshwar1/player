@@ -4,12 +4,29 @@
 #include <libwebsockets.h>
 #include <yyjson.h>
 #include <curl/curl.h>
+#include <math.h>
+#include <pthread.h>
+
+#define CHANNEL_LENGTH 10
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
 typedef float real32;
 typedef double real64;
 typedef uint16_t uint16;
+
+typedef struct
+{
+    bool  isEmpty;
+    void *data;
+} Slot;
+
+typedef struct
+{
+    Slot buffer[CHANNEL_LENGTH];
+    int  putIndex;
+    int  takeIndex;
+} Channel;
 
 uint32
 StringLength(char *str)
@@ -83,9 +100,118 @@ aur","transactTime":1774451543952,"price":"0.00000000","origQty":"0.10000000","e
 0","commissionAsset":"SOL","tradeId":1919086119}],"selfTradePreventionMode":"EXPIRE_MAKER"}
 */
 
+typedef struct
+{                               /* Used as argument to thread_start() */
+    pthread_t thread_id;        /* ID returned by pthread_create() */
+    int       thread_num;       /* Application-defined thread # */
+    Channel *channel;
+} thread_info;
+
+bool
+ChannelPut(Channel *channel, void *data)
+{
+    if (channel->putIndex == CHANNEL_LENGTH- 1 &&
+        channel->takeIndex == 0)
+    {
+        printf("Buffer full, can't put!\n");
+        return false;
+    }
+    else
+{
+        channel->buffer[channel->putIndex].data = data;
+        channel->buffer[channel->putIndex].isEmpty = false;
+        printf("put data at %x\n", channel->buffer[channel->putIndex].data);
+        ++channel->putIndex % CHANNEL_LENGTH;
+        return true;
+    }
+}
+
+void *
+ChannelTake(Channel *channel)
+{
+    if (channel->putIndex == channel->takeIndex)
+    {
+        printf("Can't take, there is nothing inside!\n");
+        return NULL;
+    }
+    else
+{
+        printf("take data at %x\n", channel->buffer[channel->takeIndex].data);
+        ++channel->takeIndex % CHANNEL_LENGTH;
+        return channel->buffer[channel->takeIndex].data;
+    }
+}
+
+static int 
+threadSend(void *arg)
+{
+    printf("inside send\n");
+    thread_info *tinfo = arg;
+    int i = 0;
+    while (i < CHANNEL_LENGTH)
+    {
+        ChannelPut(tinfo->channel, &i);
+        i++;
+    }
+
+    printf("Thread %d: top of stack near %p;\n",
+           tinfo->thread_num, (void *) &tinfo);
+
+    return 0;
+}
+
+static int 
+threadReceive(void *arg)
+{
+    thread_info *tinfo = arg;
+    int i = 0;
+    while (i < CHANNEL_LENGTH)
+    {
+        ChannelTake(tinfo->channel);
+        i++;
+        sleep(1);
+    }
+
+    printf("Thread %d: top of stack near %p;\n",
+           tinfo->thread_num, (void *) &tinfo);
+
+    return 0;
+}
+
 int main()
 {
     char *str1 = "({\"e\":\"depthUpdate\",\"E\":1774003380002,\"s\":\"BNBBTC\",\"U\":4475900104,\"u\":4475900209,\"b\":[[\"0.00911400\",\"12.80900000\"],[\"0.00911200\",\"6.79200000\"],[\"0.00911100\",\"9.55200000\"],[\"0.00911000\",\"6.74300000\"],[\"0.00910900\",\"12.21600000\"],[\"0.00910800\",\"24.02500000\"],[\"0.00910600\",\"7.45600000\"],[\"0.00910500\",\"11.54700000\"],[\"0.00907400\",\"0.59700000\"],[\"0.00907000\",\"20.07500000\"],[\"0.00906100\",\"2.25200000\"],[\"0.00906000\",\"135.11100000\"],[\"0.00905900\",\"1.58900000\"],[\"0.00905700\",\"1.96500000\"],[\"0.00905300\",\"0.74700000\"],[\"0.00905000\",\"1225.50200000\"],[\"0.00904800\",\"0.61700000\"],[\"0.00904200\",\"1.32400000\"],[\"0.00903900\",\"1.95300000\"],[\"0.00903600\",\"1.59300000\"],[\"0.00903000\",\"17.38400000\"],[\"0.00902800\",\"3.02200000\"],[\"0.00902200\",\"9.42300000\"],[\"0.00902000\",\"111.52800000\"],[\"0.00901600\",\"1.89700000\"],[\"0.00899500\",\"1.79900000\"],[\"0.00899200\",\"1.76400000\"],[\"0.00895200\",\"0.19700000\"],[\"0.00894800\",\"202.18400000\"],[\"0.00892700\",\"0.82100000\"],[\"0.00892600\",\"0.12200000\"]],\"a\":[[\"0.00911600\",\"35.12400000\"],[\"0.00911700\",\"37.287";
     char *str2 = "00000\"],[\"0.00911800\",\"14.98500000\"],[\"0.00911900\",\"41.64200000\"],[\"0.00912000\",\"18.24200000\"],[\"0.00912200\",\"7.76800000\"],[\"0.00912300\",\"5.58600000\"],[\"0.00912800\",\"15.13200000\"],[\"0.00912900\",\"72.51400000\"],[\"0.00913000\",\"105.90000000\"],[\"0.00913100\",\"21.65100000\"],[\"0.00913200\",\"7.76000000\"],[\"0.00913700\",\"32.04500000\"],[\"0.00915400\",\"0.15800000\"],[\"0.00915500\",\"0.58000000\"],[\"0.00916400\",\"13.36700000\"],[\"0.00916700\",\"0.36000000\"],[\"0.00917100\",\"2.05500000\"],[\"0.00917200\",\"106.54700000\"],[\"0.00917500\",\"1.98500000\"],[\"0.00917600\",\"162.65200000\"],[\"0.00917700\",\"0.37100000\"],[\"0.00918600\",\"0.16900000\"],[\"0.00918900\",\"0.94200000\"],[\"0.00919200\",\"0.52500000\"],[\"0.00919600\",\"1.92100000\"],[\"0.00919800\",\"12.67400000\"],[\"0.00921200\",\"3.76600000\"],[\"0.00922900\",\"0.60200000\"],[\"0.00923600\",\"1.43900000\"],[\"0.00929800\",\"13.14700000\"],[\"0.00930200\",\"2.28800000\"]]}";
     printf("string concat %s", StringCat(str1, str2));
+    int mid = ceil((1 + 2) / 2.0);
+    printf("mid is %d\n", mid);
+    
+    Channel channel = {};
+    channel.putIndex = 0;
+    channel.takeIndex = 0;
+
+    thread_info tinfo = {};
+    tinfo.channel = &channel;
+    int result =  pthread_create(&tinfo.thread_id,
+                                 NULL,
+                                 (void *)&threadSend,
+                                 &tinfo);
+    if (result < 0)
+    {
+        printf("Fail! couldn't create thread\n");
+    }
+    // void *retval;
+    // result =  pthread_join(tinfo.thread_id, &retval);
+    // if (result < 0)
+    // {
+    //     printf("Fail! couldn't join threads\n");
+    // }
+    result =  pthread_create(&tinfo.thread_id,
+                                 NULL,
+                                 (void *)&threadReceive,
+                                 &tinfo);
+    while (1)
+    {
+        // just keep the program running.
+    }
 }
