@@ -776,6 +776,8 @@ CallbackBinanceTrade(struct lws *wsi,
                         state->lastTimeParent,
                         endTime
                     );
+                    printf("refresh Times are %f - %f\n", state->timeToRefresh, state->timeToRefreshParent);
+                    printf("Times are %f - %f\n", timeElapsedMS, timeElapsedMSParent);
 
                     if (timeElapsedMS > ((State *)user)->timeToRefresh)
                     {
