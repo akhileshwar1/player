@@ -136,11 +136,16 @@ typedef struct
     Snapshot snapshot;
     Order_book OrderBook;
     real64 startPrice;
+    real64 startPriceParent;
     real64 timeToClose;
     real64 timeToRefresh;
+    real64 timeToRefreshParent;
     real64 buyPressure;
     real64 sellPressure;
+    real64 buyPressureParent;
+    real64 sellPressureParent;
     timespec lastTime;
+    timespec lastTimeParent;
     bool isOpen;
     bool AreEventsApplied;
     bool isSnapshot;
@@ -676,11 +681,13 @@ LoadTradeEvent(Trade_event *trade, char *input, State *state)
     if (trade->bmaker)
     {
         state->sellPressure += trade->quantity;
+        state->sellPressureParent += trade->quantity;
         printf("Sell pressure added to %f\n", state->sellPressure);
     }
     else
     {
         state->buyPressure += trade->quantity;
+        state->buyPressureParent += trade->quantity;
         printf("Buy pressure added to %f\n", state->buyPressure);
     }
     yyjson_doc_free(doc);
@@ -739,6 +746,7 @@ CallbackBinanceTrade(struct lws *wsi,
                     BufferTradeEvent(tradeEvent, &state->TradeEventsBuffer);
                     memset(state->event, 0, sizeof(state->event));
                 }
+
                 real64 buyPressure = state->buyPressure;
                 real64 sellPressure = state->sellPressure;
                 real64 lastPrice = state->
@@ -746,9 +754,11 @@ CallbackBinanceTrade(struct lws *wsi,
                     buffer[MAX_EVENTS - 1].price;
 
                 printf("last price is %f\n", lastPrice);
-                if (!(state->isPriceTaken))
+                if (!(state->isPriceTaken) || state->startPrice == 0.0)
                 {
+                    printf("setting the start price\n");
                     state->startPrice = lastPrice;
+                    state->startPriceParent = lastPrice;
                     state->isPriceTaken = true;
                 }
 
@@ -762,12 +772,26 @@ CallbackBinanceTrade(struct lws *wsi,
                         endTime
                     );
 
+                    real64 timeElapsedMSParent = XtimeElapsedMS(
+                        state->lastTimeParent,
+                        endTime
+                    );
+
                     if (timeElapsedMS > ((State *)user)->timeToRefresh)
                     {
                         state->startPrice = lastPrice;
                         state->lastTime = endTime;
                         state->buyPressure = 0.0;
                         state->sellPressure = 0.0;
+                    }
+
+                    if (timeElapsedMSParent > state->timeToRefreshParent)
+                    {
+                        printf("Refreshing Parent\n");
+                        state->startPriceParent   = lastPrice;
+                        state->lastTimeParent     = endTime;
+                        state->buyPressureParent  = 0.0;
+                        state->sellPressureParent = 0.0;
                     }
 
                     printf("start price is %f\n", state->startPrice);
@@ -789,6 +813,14 @@ CallbackBinanceTrade(struct lws *wsi,
                             {
                                 printf("Guilty! Too fast, need real slow and steady!\n");
                             }
+                            else if (lastPrice <= state->startPriceParent ||
+                                state->buyPressureParent < state->sellPressureParent)
+                            {
+                                printf("Guilty! Parent has done work in the opposite/choppy direction\n");
+                                printf("%f-%f, %f-%f\n", lastPrice, state->startPriceParent,
+                                        state->buyPressureParent,
+                                        state->sellPressureParent);
+                            }
                             else
                             {
                                 state->shouldPlaceOrder = true;
@@ -804,6 +836,15 @@ CallbackBinanceTrade(struct lws *wsi,
                             else if (timeElapsedMS < 25 * 60 * 1000)
                             {
                                 printf("Guilty! Too fast, need real slow and steady!\n");
+                            }
+                            else if (lastPrice >= state->startPriceParent ||
+                                state->buyPressureParent > state->sellPressureParent)
+                            {
+                                printf( "Guilty! Parent has done work in the opposite/choppy direction\n");
+                                printf("%f-%f, %f-%f\n", lastPrice,
+                                                         state->startPriceParent,
+                                                         state->buyPressureParent,
+                                                         state->sellPressureParent);
                             }
                             else
                             {
@@ -1044,7 +1085,10 @@ main()
     state.TradeEventsBuffer.currentWriteIndex = 0;
     state.buyPressure = 0.0;
     state.sellPressure = 0.0;
+    state.buyPressureParent = 0.0;
+    state.sellPressureParent = 0.0;
     state.timeToRefresh = 30 * 60 * 1000;
+    state.timeToRefreshParent = 60 * 60 * 1000;
     Position position = {};
     position.symbol = "SOLUSDT";
     Wallet wallet = {};
