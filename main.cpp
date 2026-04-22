@@ -798,7 +798,7 @@ CallbackBinanceTrade(struct lws *wsi,
 
                     printf("start price is %f\n", state->startPrice);
 
-                    if (abs((lastPrice - state->startPrice)) < 0.5)
+                    if (abs((lastPrice - state->startPrice)) < 3.0)
                     {
                         printf("Guilty! There is no price movement\n");
                     }
@@ -811,7 +811,7 @@ CallbackBinanceTrade(struct lws *wsi,
                             {
                                 printf("Guilty! Not enough pressure on buy side\n");
                             }
-                            else if (timeElapsedMS < 25 * 60 * 1000)
+                            else if (timeElapsedMS < 4 * 55 * 60 * 1000)
                             {
                                 printf("Guilty! Too fast, need real slow and steady!\n");
                             }
@@ -835,7 +835,7 @@ CallbackBinanceTrade(struct lws *wsi,
                             {
                                 printf("Guilty! Not enough pressure on sell side\n");
                             }
-                            else if (timeElapsedMS < 25 * 60 * 1000)
+                            else if (timeElapsedMS < 4 * 55 * 60 * 1000)
                             {
                                 printf("Guilty! Too fast, need real slow and steady!\n");
                             }
@@ -1089,8 +1089,8 @@ main()
     state.sellPressure = 0.0;
     state.buyPressureParent = 0.0;
     state.sellPressureParent = 0.0;
-    state.timeToRefresh = 30 * 60 * 1000;
-    state.timeToRefreshParent = 60 * 60 * 1000;
+    state.timeToRefresh = 4 * 60 * 60 * 1000;
+    state.timeToRefreshParent = 8 * 60 * 60 * 1000;
     Position position = {};
     position.symbol = "SOLUSDT";
     Wallet wallet = {};
