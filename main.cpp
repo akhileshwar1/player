@@ -798,7 +798,7 @@ CallbackBinanceTrade(struct lws *wsi,
 
                     printf("start price is %f\n", state->startPrice);
 
-                    if (abs((lastPrice - state->startPrice)) < 3.0)
+                    if (abs((lastPrice - state->startPrice)) < 1.5)
                     {
                         printf("Guilty! There is no price movement\n");
                     }
