@@ -807,7 +807,7 @@ CallbackBinanceTrade(struct lws *wsi,
                         
                         if (lastPrice > (state->startPrice))
                         {
-                            if (buyPressure < 2 * sellPressure)
+                            if (buyPressure < 1.1 * sellPressure)
                             {
                                 printf("Guilty! Not enough pressure on buy side\n");
                             }
@@ -831,7 +831,7 @@ CallbackBinanceTrade(struct lws *wsi,
                         }
                         else
                         {
-                            if (sellPressure < 2 * buyPressure)
+                            if (sellPressure < 1.1 * buyPressure)
                             {
                                 printf("Guilty! Not enough pressure on sell side\n");
                             }
@@ -872,8 +872,8 @@ CallbackBinanceTrade(struct lws *wsi,
                            ((State *)user)->timeToClose - timeElapsedMS);
 
                     if(timeElapsedMS < state->timeToClose &&
-                        ((posnType == LONG && ((lastPrice - state->startPrice) * position.qty) > -0.05) ||
-                        (posnType == SHORT && ((lastPrice - state->startPrice) * position.qty) > -0.05))) 
+                        ((posnType == LONG && ((lastPrice - state->startPrice) * position.qty) > -0.35) ||
+                        (posnType == SHORT && ((lastPrice - state->startPrice) * position.qty) > -0.35))) 
                     {
                         printf("Guilty! No need to close, time not out and loss in check\n");
                     }
