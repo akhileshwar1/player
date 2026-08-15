@@ -47,13 +47,18 @@ typedef struct
     char *event;
     Trade_events_buffer TradeEventsBuffer;
     real64 startPrice;
-    real64 timeToClose;
-    real64 timeToRefresh;
+    real64 startPriceParent;
+    uint64 timeToClose;
+    uint64 timeToRefresh;
+    uint64 timeToRefreshParent;
     real64 buyPressure;
     real64 sellPressure;
+    real64 buyPressureParent;
+    real64 sellPressureParent;
     uint64 sellTrades;
     uint64 buyTrades;
     uint64 lastTime;
+    uint64 lastTimeParent;
     bool isOpen;
     bool AreEventsApplied;
     bool isSnapshot;
@@ -132,12 +137,14 @@ LoadTradeEvent(Trade_event *trade, char *line, State *state, FILE *printFile)
     if (trade->bmaker)
     {
         state->sellPressure += trade->quantity;
+        state->sellPressureParent += trade->quantity;
         state->sellTrades++;
         fprintf(printFile, "Sell pressure added to %f\n", state->sellPressure);
     }
     else
     {
         state->buyPressure += trade->quantity;
+        state->buyPressureParent += trade->quantity;
         state->buyTrades++;
         fprintf(printFile, "Buy pressure added to %f\n", state->buyPressure);
     }
@@ -190,13 +197,13 @@ formatMSTimestamp(uint64_t us_timestamp, char *out_buf, size_t buf_sz) {
 int
 main()
 {
-    FILE *myFile = fopen("data0404.csv", "r");
+    FILE *myFile = fopen("data02.csv", "r");
     if (myFile == NULL)
     {
         printf("Couldn't open file\n");
         return -1;
     }
-    FILE *outputFile = fopen("output0404.csv", "w");
+    FILE *outputFile = fopen("output02P.csv", "w");
     setbuf(outputFile, NULL); // Disables buffering completely
     if (outputFile == NULL)
     {
@@ -204,7 +211,7 @@ main()
         return -1;
     }
 
-    FILE *printFile = fopen("print0404.txt", "w");
+    FILE *printFile = fopen("print02P.txt", "w");
     setbuf(printFile, NULL); // Disables buffering completely
     if (printFile == NULL)
     {
@@ -218,9 +225,12 @@ main()
     state.TradeEventsBuffer.currentWriteIndex = 0;
     state.buyPressure = 0.0;
     state.sellPressure = 0.0;
+    state.buyPressureParent = 0.0;
+    state.sellPressureParent = 0.0;
     state.buyTrades = 0;
     state.sellTrades = 0;
-    state.timeToRefresh = 30 * 60 * 1000 * 1000;
+    state.timeToRefresh = (uint64) 4 * 60 * 60 * 1000 * 1000;
+    state.timeToRefreshParent = (uint64) 8 * 60 * 60 * 1000 * 1000;
     Position position = {};
     position.symbol = "SOLUSDT";
     Wallet wallet = {};
@@ -249,16 +259,29 @@ main()
             uint64 endTime = trade.time;
             formatMSTimestamp(endTime, time_str, sizeof(time_str));
             fprintf(printFile, "time is %s\n", time_str);
-            real64 timeElapsedMS = endTime - state.lastTime;
+            uint64 timeElapsedMS = endTime - state.lastTime;
+            uint64 timeElapsedMSParent = endTime - state.lastTimeParent;
 
+            fprintf(printFile, "refresh Times are %lu- %lu\n", state.timeToRefresh, state.timeToRefreshParent);
+            fprintf(printFile, "Times are %lu- %lu\n", timeElapsedMS, timeElapsedMSParent);
             if (timeElapsedMS > state.timeToRefresh)
             {
+                fprintf(printFile, "Refreshing child\n");
                 state.startPrice = lastPrice;
                 state.lastTime = endTime;
                 state.buyPressure = 0.0;
                 state.sellPressure = 0.0;
                 state.buyTrades = 0;
                 state.sellTrades = 0;
+            }
+
+            if (timeElapsedMSParent > state.timeToRefreshParent)
+            {
+                fprintf(printFile, "Refreshing Parent\n");
+                state.startPriceParent   = lastPrice;
+                state.lastTimeParent     = endTime;
+                state.buyPressureParent  = 0.0;
+                state.sellPressureParent = 0.0;
             }
 
             fprintf(printFile, "start price is %f\n", state.startPrice);
@@ -272,7 +295,7 @@ main()
                 char body[300];
                 if (lastPrice > state.startPrice)
                 {
-                    if (buyPressure < 2 * sellPressure)
+                    if (buyPressure < 1.1 * sellPressure)
                     {
                         fprintf(printFile, "Guilty! Not enough pressure on buy side\n");
                     }
@@ -280,13 +303,21 @@ main()
                     // {
                     //     fprintf(printFile, "Guilty! Many buy members around it\n");
                     // }
-                    else if (timeElapsedMS < 25 * 60 * 1000 * 1000)
+                    else if (timeElapsedMS < (uint64) 4 * 55 * 60 * 1000 * 1000)
                     {
                         fprintf(printFile, "Guilty! Too fast, need real slow and steady!\n");
                     }
+                    else if (lastPrice <= state.startPriceParent ||
+                             state.buyPressureParent < state.sellPressureParent)
+                    {
+                        fprintf(printFile, "Guilty! Parent has done work in the opposite/choppy direction\n");
+                        fprintf(printFile, "%f-%f, %f-%f\n", lastPrice, state.startPriceParent,
+                                                             state.buyPressureParent,
+                                                             state.sellPressureParent);
+                    }
                     else
                     {
-                        fprintf(printFile, "opening the position after %f at lastPrice %f\n",
+                        fprintf(printFile, "opening the position after %lu at lastPrice %f\n",
                                timeElapsedMS,
                                lastPrice);
                         Trade trade = {};
@@ -327,7 +358,7 @@ main()
                 }
                 else
                 {
-                    if (sellPressure < 2 * buyPressure)
+                    if (sellPressure < 1.1 * buyPressure)
                     {
                         fprintf(printFile, "Guilty! Not enough pressure on sell side\n");
                     }
@@ -335,13 +366,21 @@ main()
                     // {
                     //     fprintf(printFile, "Guilty! Many sell members around it\n");
                     // }
-                    else if (timeElapsedMS < 25 * 60 * 1000 * 1000)
+                    else if (timeElapsedMS < (uint64) 4 * 55 * 60 * 1000 * 1000)
                     {
                         fprintf(printFile, "Guilty! Too fast, need real slow and steady!\n");
                     }
+                    else if (lastPrice >= state.startPriceParent ||
+                             state.buyPressureParent > state.sellPressureParent)
+                    {
+                        fprintf(printFile, "Guilty! Parent has done work in the opposite/choppy direction\n");
+                        fprintf(printFile, "%f-%f, %f-%f\n", lastPrice, state.startPriceParent,
+                                state.buyPressureParent,
+                                state.sellPressureParent);
+                    }
                     else
                     {
-                        fprintf(printFile, "opening the position after %f at lastPrice %f\n",
+                        fprintf(printFile, "opening the position after %lu at lastPrice %f\n",
                                timeElapsedMS,
                                lastPrice);
                         Trade trade = {};
@@ -388,15 +427,16 @@ main()
         {
 
             uint64 endTime = trade.time;
-            real64 timeElapsedMS = endTime - state.lastTime;
+            uint64 timeElapsedMS = endTime - state.lastTime;
             Posn_type posnType = state.posnType;
-            fprintf(printFile, "position is open, remaining time %f\n",
+            fprintf(printFile, "position is open, remaining time %lu\n",
                    state.timeToClose - timeElapsedMS);
 
             if (timeElapsedMS < state.timeToClose &&
-                ((posnType == LONG && ((lastPrice - position.price) * position.qty) > -0.05) ||
-                 (posnType == SHORT && ((lastPrice - position.price) * position.qty) > -0.05)))
+                ((posnType == LONG && ((lastPrice - position.price) * position.qty) > -0.35) ||
+                 (posnType == SHORT && ((lastPrice - position.price) * position.qty) > -0.35)))
             {
+                fprintf(printFile, "change\n");
                 fprintf(printFile, "Guilty! No need to close, time not out and loss in check %f\n",
                         (lastPrice - state.startPrice) * position.qty);
             }
