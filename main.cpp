@@ -7,10 +7,13 @@
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
 #include <malloc.h>
+#include <uuid/uuid.h>
 
 #define ArrayCount(Array) (sizeof(Array) / sizeof(Array[0]))
 #define Assert(Expression) if(!(Expression)) {*(int *)0 = 0;}
 #define MARKET_BASE_ENDP "stream.binance.com"
+#define TRADE_BASE_ENDP "ws-api.binance.com"
+#define TRADE_PATH "/ws-api/v3"
 #define STREAM_PATH "/ws/solusdt@depth"
 #define TRADE_STREAM_PATH "/ws/solusdt@trade"
 #define MAX_LEVELS 10
@@ -19,6 +22,9 @@
 #define TRADE_FEE 0.1 / 100
 #define SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=SOLUSDT&limit=10"
 #define TRADE_URL "https://api.binance.com/api/v3/order?"
+#define MIN_REFRESH_TIME 5000 
+#define MAX_ORDERS 3 
+#define SPREAD_LEVEL 5 /* 5th level on asks and bids is the spread. */ 
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
@@ -36,7 +42,9 @@ typedef struct
 {
     char *symbol;
     real64 price;
+    real64 ltp;
     real64 qty;
+    real64 pnl;
 } Position;
 
 typedef struct
@@ -124,8 +132,28 @@ typedef enum
     LOADBUY,
     LOADSELL,
     CLOSELONG,
-    CLOSESHORT
+    CLOSESHORT,
+    MARKET,
+    LIMIT
 } Order_type;
+
+typedef enum
+{
+    PENDING,
+    COMPLETED,
+    CANCELLED
+} Order_status;
+
+typedef struct 
+{
+    char *id;
+    char *coin;
+    real64 price;
+    real64 qty;
+    Order_type type;
+    Order_status status;
+    Side side;
+} Order;
 
 typedef struct timespec timespec;
 typedef struct
@@ -157,6 +185,8 @@ typedef struct
     time_t lastTradeTime;
     bool shouldPlaceOrder;
     Order_type orderType;
+    Order orders[MAX_ORDERS];
+    int currOrderIndex;
 } State;
 
 void formatMSTimestamp(uint64_t ms_timestamp, char *out_buf, size_t buf_sz) {
@@ -548,6 +578,7 @@ writeDataBinanceOrder(void *buffer, size_t size, size_t nmemb, void *userp)
     return realsize;
 }
 
+/* http call */
 bool BinanceMakeOrder(char *body) {
     CURL *curl = curl_easy_init(); // Fresh handle
     /* NOTE: THIS LINE BELOW IS IMP FOR THE CALL TO RETURN */
@@ -666,6 +697,47 @@ CallbackBinance(struct lws *wsi,
     return 0;
 }
 
+int
+CallbackBinanceTrade(struct lws *wsi,
+                     enum lws_callback_reasons reason,
+                     void *user, void *in, size_t len)
+{
+    (void) wsi;
+    (void) user;
+    (void) in;
+    (void) len;
+    switch (reason)
+    {
+        case LWS_CALLBACK_CLIENT_ESTABLISHED:
+            printf("callback_binance_trade: LWS_CALLBACK_CLIENT_ESTABLISHED\n");
+            break;
+
+        case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+            printf("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
+            break;
+
+        case LWS_CALLBACK_CLOSED:
+            printf("LWS_CALLBACK_CLOSED\n");
+            break;
+
+        case LWS_CALLBACK_CLIENT_RECEIVE:
+            {
+                ((char *)in)[len] = '\0';
+                State *state = ((State *)user);
+                Assert(len <= 4096)
+                char buf[4096];
+                memcpy(buf, in, len);
+                buf[len] = '\0';
+                printf("rx %d '%s'\n", (int)len, buf);
+                break;
+            }
+
+        default:
+            break;
+    }
+    return 0;
+}
+
 void
 LoadTradeEvent(Trade_event *trade, char *input, State *state)
 {   
@@ -701,7 +773,7 @@ LoadTradeEvent(Trade_event *trade, char *input, State *state)
 }
 
 int
-CallbackBinanceTrade(struct lws *wsi,
+CallbackBinanceTradeStream(struct lws *wsi,
                 enum lws_callback_reasons reason,
                 void *user, void *in, size_t len)
 {
@@ -935,6 +1007,12 @@ static struct lws_protocols protocols[] = {
         1024,
     },
     {
+        "binance-trade-stream",
+        CallbackBinanceTradeStream,
+        0,
+        1024,
+    },
+    {
         "binance-trade",
         CallbackBinanceTrade,
         0,
@@ -1061,6 +1139,28 @@ IgnoreAndApplyEvents(State *state)
     }
 }
 
+quote
+getBestQuote(Order_book *orderBook)
+{
+    return orderBook->bids[0];
+}
+
+void
+generateUUID(char *uuidStr)
+{
+    uuid_t binuuid;
+    // Length: 36 characters + 1 null terminator
+    char uuid_str[37]; 
+
+    // Generate random UUID (Version 4)
+    uuid_generate_random(binuuid);
+
+    // Convert the binary UUID into its standard string representation
+    uuid_unparse(binuuid, uuidStr);
+
+    printf("Generated UUID: %s\n", uuidStr);
+}
+
 int
 main()
 {
@@ -1106,6 +1206,10 @@ main()
     state.wallet = wallet;
     state.position = position;
     state.outputFile = outputFile;
+    timespec endTime;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
+    state.lastTime = endTime;
+    state.currOrderIndex = -1;
     // | LLL_DEBUG
     // lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO, NULL); 
     printf("running\n");
@@ -1127,30 +1231,55 @@ main()
         printf("Couldn't create context\n");
         return -1;
     }
+    /* connect the websocket to binance orderbook */
     struct lws_protocols protocol = {};
-    protocol.name = "binance";
-    protocol.callback = CallbackBinance;
+    // protocol.name = "binance";
+    // protocol.callback = CallbackBinance;
+    // protocol.per_session_data_size = 256;
+    //
+    // struct lws_client_connect_info ccinfo = {};
+    // ccinfo.context = context;
+    // ccinfo.address = MARKET_BASE_ENDP;
+    // ccinfo.port = port;
+    // ccinfo.ssl_connection = 1;
+    // ccinfo.path = STREAM_PATH;
+    // ccinfo.host = ccinfo.address;
+    // ccinfo.origin = ccinfo.address;
+    // ccinfo.ssl_connection = LCCSCF_USE_SSL;
+    // ccinfo.ietf_version_or_minus_one = -1;
+    // ccinfo.protocol = "binance";
+    // ccinfo.userdata = (void *)&state;
+    // struct lws *lws = lws_client_connect_via_info(&ccinfo);
+    // if (lws == NULL)
+    // {
+    //     printf("Connection failed\n");
+    //     return -1;
+    // }
+
+    /* connect the websocket to binance trade */
+    struct lws_protocols protocolTrade = {};
+    protocol.name = "binanceTrade";
+    protocol.callback = CallbackBinanceTrade;
     protocol.per_session_data_size = 256;
 
-    struct lws_client_connect_info ccinfo = {};
-    ccinfo.context = context;
-    ccinfo.address = MARKET_BASE_ENDP;
-    ccinfo.port = port;
-    ccinfo.ssl_connection = 1;
-    ccinfo.path = STREAM_PATH;
-    ccinfo.host = ccinfo.address;
-    ccinfo.origin = ccinfo.address;
-    ccinfo.ssl_connection = LCCSCF_USE_SSL;
-    ccinfo.ietf_version_or_minus_one = -1;
-    ccinfo.protocol = "binance";
-    ccinfo.userdata = (void *)&state;
-    struct lws *lws = lws_client_connect_via_info(&ccinfo);
-    if (lws == NULL)
+    struct lws_client_connect_info ccinfoTrade = {};
+    ccinfoTrade.context = context;
+    ccinfoTrade.address = TRADE_BASE_ENDP;
+    ccinfoTrade.port = port;
+    ccinfoTrade.ssl_connection = 1;
+    ccinfoTrade.path = TRADE_PATH;
+    ccinfoTrade.host = ccinfoTrade.address;
+    ccinfoTrade.origin = ccinfoTrade.address;
+    ccinfoTrade.ssl_connection = LCCSCF_USE_SSL;
+    ccinfoTrade.ietf_version_or_minus_one = -1;
+    ccinfoTrade.protocol = "binance-trade";
+    ccinfoTrade.userdata = (void *)&state;
+    struct lws *lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
+    if (lwsTrade == NULL)
     {
         printf("Connection failed\n");
         return -1;
     }
-
     // struct lws_protocols protocolTrade = {};
     // protocol.name = "binance-trade";
     // protocol.callback = CallbackBinanceTrade;
@@ -1220,7 +1349,126 @@ main()
             loopcount = 0;
         }
 
-        // if ((time(NULL) - state.lastTradeTime > 10)) {
+        /* on each tick, check if there is a position open,
+           if yes, check the loss, if it's >= SL, take the loss
+           and cancel the other order,else if its in profit,
+           wait till it hits the other order.
+
+           on the other hand, if there is no position, send
+           buy and sell orders, and go back to step 1.
+
+           The point of refresh is on a pair, we refresh the 
+           pair to get it higher up the queue on the exchange */ 
+        quote bestQ = getBestQuote(&state.OrderBook);
+        Order order = {};
+        order.price = bestQ.price;
+        order.qty = 0.1;
+        order.coin = (char *)"SOLUSDT"; 
+        order.side = BUY; 
+        order.type = MARKET; 
+        order.status = PENDING; 
+        char uuidStr[37];
+        generateUUID(uuidStr);
+        order.id = uuidStr;
+        /* send the order through wsi instance */
+        yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+        yyjson_mut_val *root = yyjson_mut_obj(doc);
+        yyjson_mut_doc_set_root(doc, root);
+
+        // Set root["name"] and root["star"]
+        yyjson_mut_obj_add_str(doc, root, "id", order.id);
+        yyjson_mut_obj_add_str(doc, root, "method", "order.place");
+        yyjson_mut_val *params = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_str(doc, root, "symbol", order.coin);
+        yyjson_mut_obj_add_str(doc, root, "side", OrderSideString[order.side]);
+        yyjson_mut_obj_add_str(doc, root, "type", OrderTypeString[order.type]);
+        uint64 timestamp = BinanceTimestamp();
+        yyjson_mut_obj_add_int(doc, root, "timestamp", timestamp);
+        yyjson_mut_obj_add_str(doc, root, "apiKey", get_env(api_key));
+        yyjson_mut_obj_add_val(doc, root, "params", params);
+        const char *json = yyjson_mut_write(doc, 0, NULL);
+
+        lws_write(lwsTrade, json, sizeof(json), "binance-trade");
+        // if (state.position.qty != 0)
+        // {
+        //     /* check if refresh and
+        //        create the pair of orders with the target spread. */
+        //     timespec endTime;
+        //     clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
+        //     real64 timeElapsedMS = XtimeElapsedMS(
+        //         state.lastTime,
+        //         endTime
+        //     );
+        //     if (timeElapsedMS > MIN_REFRESH_TIME)
+        //     {
+        //         cancelAllOrders(state.orders);
+        //         // createNewPair(state.orders);
+        //         Order buyOrder = {};
+        //         Order sellOrder = {};
+        //         buyOrder.coin = (char *)"SOLUSDT";
+        //         buyOrder.side = BUY;
+        //         buyOrder.type = LIMIT;
+        //         buyOrder.qty = 0.1;
+        //         buyOrder.price = state.OrderBook.bids[SPREAD_LEVEL].price; 
+        //         buyOrder.status = PENDING; 
+        //         sellOrder.coin = (char *)"SOLUSDT";
+        //         sellOrder.side = SELL;
+        //         sellOrder.type = LIMIT;
+        //         sellOrder.qty = 0.1;
+        //         sellOrder.price = state.OrderBook.asks[SPREAD_LEVEL].price;
+        //         sellOrder.status = PENDING; 
+        //         char body[1024];
+        //         uint64 timestamp = BinanceTimestamp();
+        //         sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+        //                 buyOrder.coin,
+        //                 (buyOrder.side == BUY) ? "BUY" : "SELL",
+        //                 (buyOrder.type == MARKET) ? "MARKET" : "LIMIT",
+        //                 buyOrder.qty,
+        //                 timestamp);
+        //         printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+        //         bool res = BinanceMakeOrder(body);
+        //         sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+        //                 sellOrder.coin,
+        //                 (sellOrder.side == BUY) ? "BUY" : "SELL",
+        //                 (sellOrder.type == MARKET) ? "MARKET" : "LIMIT",
+        //                 sellOrder.qty,
+        //                 timestamp);
+        //         printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+        //         res = BinanceMakeOrder(body);
+        //
+        //         state.orders[++state.currOrderIndex] = buyOrder;
+        //         state.orders[++state.currOrderIndex] = sellOrder;
+        //     }
+        //
+        //
+        // }
+        // else
+        // {
+        //     /* update the position's pnl and if >= sl, cancel 
+        //        the other order */
+        //     real64 ltp = getLTP(state->OrderBook);
+        //     state.position.ltp = ltp;
+        //     state.position.pnl = (ltp - state.position.price) * state.position.qty;
+        //     if (state.position.pnl < 0 && abs(state.position.pnl) >= state.SL)
+        //     {
+        //         cancelAllOrders(state.orders);
+        //     }
+        // } 
+
+        // apply the event to the order book in the callback, if the OB is ready.
+        lws_service(context, 0);
+
+        PrintOrderBook(&state);
+        // PrintTradeState(&state);
+        loopcount++;
+    }
+
+
+    lws_context_destroy(context);
+    return 0;
+}
+
+// if ((time(NULL) - state.lastTradeTime > 10)) {
         //     printf("No data — reconnecting\n");
         //     fflush(stdout);
         //
@@ -1527,16 +1775,3 @@ main()
         //     }
         //     state.shouldPlaceOrder = false;
         // }
-
-        // apply the event to the order book in the callback, if the OB is ready.
-        lws_service(context, 0);
-
-        PrintOrderBook(&state);
-        // PrintTradeState(&state);
-        loopcount++;
-    }
-
-
-    lws_context_destroy(context);
-    return 0;
-}
