@@ -189,6 +189,24 @@ typedef struct
     int currOrderIndex;
 } State;
 
+const char* OrderSideString[] =
+    {
+        "BUY",
+        "SELL"
+    };
+
+const char* OrderTypeString[] =
+    {
+        "OPENBUY",
+        "OPENSELL",
+        "LOADBUY",
+        "LOADSELL",
+        "CLOSELONG",
+        "CLOSESHORT",
+        "MARKET",
+        "LIMIT"
+    };
+
 void formatMSTimestamp(uint64_t ms_timestamp, char *out_buf, size_t buf_sz) {
     time_t seconds = ms_timestamp / 1000;
     
@@ -1233,28 +1251,28 @@ main()
     }
     /* connect the websocket to binance orderbook */
     struct lws_protocols protocol = {};
-    // protocol.name = "binance";
-    // protocol.callback = CallbackBinance;
-    // protocol.per_session_data_size = 256;
-    //
-    // struct lws_client_connect_info ccinfo = {};
-    // ccinfo.context = context;
-    // ccinfo.address = MARKET_BASE_ENDP;
-    // ccinfo.port = port;
-    // ccinfo.ssl_connection = 1;
-    // ccinfo.path = STREAM_PATH;
-    // ccinfo.host = ccinfo.address;
-    // ccinfo.origin = ccinfo.address;
-    // ccinfo.ssl_connection = LCCSCF_USE_SSL;
-    // ccinfo.ietf_version_or_minus_one = -1;
-    // ccinfo.protocol = "binance";
-    // ccinfo.userdata = (void *)&state;
-    // struct lws *lws = lws_client_connect_via_info(&ccinfo);
-    // if (lws == NULL)
-    // {
-    //     printf("Connection failed\n");
-    //     return -1;
-    // }
+    protocol.name = "binance";
+    protocol.callback = CallbackBinance;
+    protocol.per_session_data_size = 256;
+
+    struct lws_client_connect_info ccinfo = {};
+    ccinfo.context = context;
+    ccinfo.address = MARKET_BASE_ENDP;
+    ccinfo.port = port;
+    ccinfo.ssl_connection = 1;
+    ccinfo.path = STREAM_PATH;
+    ccinfo.host = ccinfo.address;
+    ccinfo.origin = ccinfo.address;
+    ccinfo.ssl_connection = LCCSCF_USE_SSL;
+    ccinfo.ietf_version_or_minus_one = -1;
+    ccinfo.protocol = "binance";
+    ccinfo.userdata = (void *)&state;
+    struct lws *lws = lws_client_connect_via_info(&ccinfo);
+    if (lws == NULL)
+    {
+        printf("Connection failed\n");
+        return -1;
+    }
 
     /* connect the websocket to binance trade */
     struct lws_protocols protocolTrade = {};
@@ -1280,30 +1298,6 @@ main()
         printf("Connection failed\n");
         return -1;
     }
-    // struct lws_protocols protocolTrade = {};
-    // protocol.name = "binance-trade";
-    // protocol.callback = CallbackBinanceTrade;
-    // protocol.per_session_data_size = 256;
-    //
-    // struct lws_client_connect_info ccinfoTrade = {};
-    // ccinfoTrade.context = context;
-    // ccinfoTrade.address = MARKET_BASE_ENDP;
-    // ccinfoTrade.port = port;
-    // ccinfoTrade.ssl_connection = 1;
-    // ccinfoTrade.path = TRADE_STREAM_PATH;
-    // ccinfoTrade.host = ccinfoTrade.address;
-    // ccinfoTrade.origin = ccinfoTrade.address;
-    // ccinfoTrade.ssl_connection = LCCSCF_USE_SSL;
-    // ccinfoTrade.ietf_version_or_minus_one = -1;
-    // ccinfoTrade.protocol = "binance-trade";
-    // ccinfoTrade.userdata = (void *)&state;
-    // struct lws *lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
-    // if (lwsTrade == NULL)
-    // {
-    //     printf("Connection failed\n");
-    //     return -1;
-    // }
-
     uint16 loopcount = 0;
     while(1)
     {
@@ -1360,12 +1354,13 @@ main()
            The point of refresh is on a pair, we refresh the 
            pair to get it higher up the queue on the exchange */ 
         quote bestQ = getBestQuote(&state.OrderBook);
+        real64 quantity = 0.01;
         Order order = {};
         order.price = bestQ.price;
         order.qty = 0.1;
         order.coin = (char *)"SOLUSDT"; 
         order.side = BUY; 
-        order.type = MARKET; 
+        order.type = LIMIT; 
         order.status = PENDING; 
         char uuidStr[37];
         generateUUID(uuidStr);
@@ -1379,16 +1374,46 @@ main()
         yyjson_mut_obj_add_str(doc, root, "id", order.id);
         yyjson_mut_obj_add_str(doc, root, "method", "order.place");
         yyjson_mut_val *params = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_str(doc, root, "symbol", order.coin);
-        yyjson_mut_obj_add_str(doc, root, "side", OrderSideString[order.side]);
-        yyjson_mut_obj_add_str(doc, root, "type", OrderTypeString[order.type]);
+        yyjson_mut_obj_add_str(doc, params, "apiKey", getenv("API_KEY"));
+        yyjson_mut_obj_add_float(doc, params, "price", bestQ.price);
+        yyjson_mut_obj_add_float(doc, params, "quantity", quantity);
+        yyjson_mut_obj_add_str(doc, params, "side", OrderSideString[order.side]);
+        /* NOTE(AKHIL): for the signature to pass, the params should be sorted
+         *              alphabetically, and the price and quantities should be 
+         *              same in query string and params json to the decimal point */
         uint64 timestamp = BinanceTimestamp();
-        yyjson_mut_obj_add_int(doc, root, "timestamp", timestamp);
-        yyjson_mut_obj_add_str(doc, root, "apiKey", get_env(api_key));
+        char body[1024];
+        snprintf(body,
+                 sizeof(body),
+                 "apiKey=%s&price=%.2f&quantity=%.2f&side=%s&symbol=%s&timestamp=%lu&timeInForce=%s&type=%s",
+                 getenv("API_KEY"),
+                 bestQ.price,
+                 quantity,
+                 OrderSideString[order.side],
+                 order.coin,
+                 timestamp,
+                 "GTC",
+                 OrderTypeString[order.type]); 
+        printf("body is %s\n", body);
+        char signature[2048];
+        generate_signature(body, getenv("API_SECRET"), signature);
+        yyjson_mut_obj_add_str(doc, params, "signature", signature);
+        yyjson_mut_obj_add_str(doc, params, "symbol", order.coin);
+        yyjson_mut_obj_add_int(doc, params, "timestamp", timestamp);
+        yyjson_mut_obj_add_str(doc, params, "timeInForce", "GTC");
+        yyjson_mut_obj_add_str(doc, params, "type", OrderTypeString[order.type]);
         yyjson_mut_obj_add_val(doc, root, "params", params);
-        const char *json = yyjson_mut_write(doc, 0, NULL);
+        char *json = yyjson_mut_write(doc, 0, NULL);
+        printf("json is %s\n", json);
 
-        lws_write(lwsTrade, json, sizeof(json), "binance-trade");
+        if(loopcount == 50)
+        {
+            printf("WRITING==============\n");
+            char buf[LWS_PRE + StringLength(json)];
+            memcpy(&buf[LWS_PRE], json, StringLength(json));
+            lws_write(lwsTrade, (unsigned char *)&buf[LWS_PRE], StringLength(json), LWS_WRITE_TEXT);
+        }
+        yyjson_mut_doc_free(doc);
         // if (state.position.qty != 0)
         // {
         //     /* check if refresh and
@@ -1775,3 +1800,28 @@ main()
         //     }
         //     state.shouldPlaceOrder = false;
         // }
+// struct lws_protocols protocolTrade = {};
+    // protocol.name = "binance-trade";
+    // protocol.callback = CallbackBinanceTrade;
+    // protocol.per_session_data_size = 256;
+    //
+    // struct lws_client_connect_info ccinfoTrade = {};
+    // ccinfoTrade.context = context;
+    // ccinfoTrade.address = MARKET_BASE_ENDP;
+    // ccinfoTrade.port = port;
+    // ccinfoTrade.ssl_connection = 1;
+    // ccinfoTrade.path = TRADE_STREAM_PATH;
+    // ccinfoTrade.host = ccinfoTrade.address;
+    // ccinfoTrade.origin = ccinfoTrade.address;
+    // ccinfoTrade.ssl_connection = LCCSCF_USE_SSL;
+    // ccinfoTrade.ietf_version_or_minus_one = -1;
+    // ccinfoTrade.protocol = "binance-trade";
+    // ccinfoTrade.userdata = (void *)&state;
+    // struct lws *lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
+    // if (lwsTrade == NULL)
+    // {
+    //     printf("Connection failed\n");
+    //     return -1;
+    // }
+
+
