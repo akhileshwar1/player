@@ -146,7 +146,7 @@ typedef enum
 
 typedef struct 
 {
-    char *id;
+    char id[100];
     char *coin;
     real64 price;
     real64 qty;
@@ -1357,21 +1357,22 @@ main()
         real64 quantity = 0.01;
         Order order = {};
         order.price = bestQ.price;
-        order.qty = 0.1;
+        order.qty = 0.2;
         order.coin = (char *)"SOLUSDT"; 
         order.side = BUY; 
         order.type = LIMIT; 
         order.status = PENDING; 
         char uuidStr[37];
         generateUUID(uuidStr);
-        order.id = uuidStr;
+        strcpy(order.id, uuidStr);
+        generateUUID(uuidStr);
         /* send the order through wsi instance */
         yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
         yyjson_mut_val *root = yyjson_mut_obj(doc);
         yyjson_mut_doc_set_root(doc, root);
 
         // Set root["name"] and root["star"]
-        yyjson_mut_obj_add_str(doc, root, "id", order.id);
+        yyjson_mut_obj_add_str(doc, root, "id", uuidStr);
         yyjson_mut_obj_add_str(doc, root, "method", "order.place");
         yyjson_mut_val *params = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_str(doc, params, "apiKey", getenv("API_KEY"));
@@ -1385,22 +1386,22 @@ main()
         char body[1024];
         snprintf(body,
                  sizeof(body),
-                 "apiKey=%s&price=%.2f&quantity=%.2f&side=%s&symbol=%s&timestamp=%lu&timeInForce=%s&type=%s",
+                 "apiKey=%s&price=%.2f&quantity=%.2f&side=%s&symbol=%s&timeInForce=%s&timestamp=%lu&type=%s",
                  getenv("API_KEY"),
                  bestQ.price,
                  quantity,
                  OrderSideString[order.side],
                  order.coin,
-                 timestamp,
                  "GTC",
+                 timestamp,
                  OrderTypeString[order.type]); 
         printf("body is %s\n", body);
         char signature[2048];
         generate_signature(body, getenv("API_SECRET"), signature);
         yyjson_mut_obj_add_str(doc, params, "signature", signature);
         yyjson_mut_obj_add_str(doc, params, "symbol", order.coin);
-        yyjson_mut_obj_add_int(doc, params, "timestamp", timestamp);
         yyjson_mut_obj_add_str(doc, params, "timeInForce", "GTC");
+        yyjson_mut_obj_add_int(doc, params, "timestamp", timestamp);
         yyjson_mut_obj_add_str(doc, params, "type", OrderTypeString[order.type]);
         yyjson_mut_obj_add_val(doc, root, "params", params);
         char *json = yyjson_mut_write(doc, 0, NULL);
@@ -1412,6 +1413,42 @@ main()
             char buf[LWS_PRE + StringLength(json)];
             memcpy(&buf[LWS_PRE], json, StringLength(json));
             lws_write(lwsTrade, (unsigned char *)&buf[LWS_PRE], StringLength(json), LWS_WRITE_TEXT);
+
+            /* cancel that order */
+            yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+            yyjson_mut_val *root = yyjson_mut_obj(doc);
+            yyjson_mut_doc_set_root(doc, root);
+
+            generateUUID(uuidStr);
+            // Set root["name"] and root["star"]
+            yyjson_mut_obj_add_str(doc, root, "id", uuidStr);
+            yyjson_mut_obj_add_str(doc, root, "method", "order.cancel");
+            yyjson_mut_val *params = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_str(doc, params, "apiKey", getenv("API_KEY"));
+            yyjson_mut_obj_add_str(doc, params, "origClientOrderId", order.id);
+            uint64 timestamp = BinanceTimestamp();
+            char body[1024];
+            snprintf(body,
+                     sizeof(body),
+                     "apiKey=%s&origClientOrderId=%s&symbol=%s&timestamp=%lu",
+                     getenv("API_KEY"),
+                     order.id,
+                     order.coin,
+                     timestamp);
+            printf("body is %s\n", body);
+            char signature[2048];
+            generate_signature(body, getenv("API_SECRET"), signature);
+            yyjson_mut_obj_add_str(doc, params, "signature", signature);
+            yyjson_mut_obj_add_str(doc, params, "symbol", order.coin);
+            yyjson_mut_obj_add_int(doc, params, "timestamp", timestamp);
+            yyjson_mut_obj_add_val(doc, root, "params", params);
+            json = yyjson_mut_write(doc, 0, NULL);
+            printf("json is %s\n", json);
+            printf("WRITING CANCEL==============\n");
+            char bufCancel[LWS_PRE + StringLength(json)];
+            memcpy(&bufCancel[LWS_PRE], json, StringLength(json));
+            lws_write(lwsTrade, (unsigned char *)&bufCancel[LWS_PRE], StringLength(json), LWS_WRITE_TEXT);
+            yyjson_mut_doc_free(doc);
         }
         yyjson_mut_doc_free(doc);
         // if (state.position.qty != 0)
