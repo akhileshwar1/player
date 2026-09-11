@@ -189,6 +189,14 @@ typedef struct
     int currOrderIndex;
 } State;
 
+// Define a structure to hold your per-session (per-connection) data
+struct per_session_data__minimal {
+    unsigned char *buffer; // Pointer to the data to be sent
+    size_t len;           // Total length of data remaining
+    size_t ptr;           // Current read position in the buffer
+};
+
+
 const char* OrderSideString[] =
     {
         "BUY",
@@ -274,6 +282,90 @@ char
     }
     *ptr = '\0';
     return buffer;
+}
+
+static int
+CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
+                     void *user, void *in, size_t len)
+{
+    // Cast the user storage pointer to our session structure
+    struct per_session_data__minimal *pss = 
+        (struct per_session_data__minimal *)user;
+
+    switch (reason) {
+
+    case LWS_CALLBACK_SERVER_WRITEABLE:
+            {
+                // 1. Check if we actually have data left to send
+                if (!pss || !pss->buffer || pss->ptr >= pss->len) {
+                    break;
+                }
+
+                // 2. Determine how much data to send in this single frame
+                size_t remaining = pss->len - pss->ptr;
+                size_t chunk_size = (remaining > 1024) ? 1024 : remaining;
+
+                // 3. Set up framing flags based on whether this is the final chunk
+                int is_final_fragment = (pss->ptr + chunk_size >= pss->len);
+
+                // 4. Perform the SINGLE allowed lws_write() call for this callback event
+                // Note: lws_write expects the pointer to start AFTER the LWS_PRE padding
+                int n = lws_write(wsi, &pss->buffer[LWS_PRE + pss->ptr], chunk_size, LWS_WRITE_TEXT);
+
+                if (n < 0) {
+                    lwsl_err("ERROR %d writing to ws socket\n", n);
+                    return -1; // Closes the connection cleanly
+                }
+
+                // 5. Advance our read pointer by the number of bytes successfully written
+                pss->ptr += chunk_size;
+
+                // 6. If we have more data left, request another writeable callback immediately
+                if (pss->ptr < pss->len) {
+                    lws_callback_on_writable(wsi);
+                } else {
+                    // Clean up buffer memory if sending is completely finished
+                    free(pss->buffer);
+                    pss->buffer = NULL;
+                }
+                break;
+            }
+
+    case LWS_CALLBACK_CLOSED:
+            {
+                // Clean up memory if the client disconnects before transmission completes
+                if (pss && pss->buffer) {
+                    free(pss->buffer);
+                    pss->buffer = NULL;
+                }
+                break;
+            }
+
+    default:
+        break;
+    }
+
+    return 0;
+}
+
+// Helper function to trigger a message send from your application logic
+void
+queue_message_to_send(struct lws *wsi,
+                      struct per_session_data__minimal *pss,
+                      const char *message)
+{
+    size_t msg_len = strlen(message);
+    pss->len = msg_len;
+    pss->ptr = 0;
+
+    // CRITICAL: Libwebsockets requires LWS_PRE bytes of free padding BEFORE the payload data
+    pss->buffer = (unsigned char *)malloc(LWS_PRE + msg_len);
+    
+    // Copy your payload into the safe region after the pre-padding space
+    memcpy(&pss->buffer[LWS_PRE], message, msg_len);
+
+    // Tell the lws event loop that this connection wants to write data
+    lws_callback_on_writable(wsi);
 }
 
 void
@@ -715,47 +807,6 @@ CallbackBinance(struct lws *wsi,
     return 0;
 }
 
-int
-CallbackBinanceTrade(struct lws *wsi,
-                     enum lws_callback_reasons reason,
-                     void *user, void *in, size_t len)
-{
-    (void) wsi;
-    (void) user;
-    (void) in;
-    (void) len;
-    switch (reason)
-    {
-        case LWS_CALLBACK_CLIENT_ESTABLISHED:
-            printf("callback_binance_trade: LWS_CALLBACK_CLIENT_ESTABLISHED\n");
-            break;
-
-        case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-            printf("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
-            break;
-
-        case LWS_CALLBACK_CLOSED:
-            printf("LWS_CALLBACK_CLOSED\n");
-            break;
-
-        case LWS_CALLBACK_CLIENT_RECEIVE:
-            {
-                ((char *)in)[len] = '\0';
-                State *state = ((State *)user);
-                Assert(len <= 4096)
-                char buf[4096];
-                memcpy(buf, in, len);
-                buf[len] = '\0';
-                printf("rx %d '%s'\n", (int)len, buf);
-                break;
-            }
-
-        default:
-            break;
-    }
-    return 0;
-}
-
 void
 LoadTradeEvent(Trade_event *trade, char *input, State *state)
 {   
@@ -1033,8 +1084,9 @@ static struct lws_protocols protocols[] = {
     {
         "binance-trade",
         CallbackBinanceTrade,
-        0,
+        sizeof(struct per_session_data__minimal),
         1024,
+        0, NULL, 0
     },
     { NULL, NULL, 0, 0 }    // Terminator - ALWAYS REQUIRED
 };
@@ -1227,9 +1279,12 @@ sendOrder(Order *order, struct lws *lwsTrade)
     char *json = yyjson_mut_write(doc, 0, NULL);
     printf("json is %s\n", json);
     printf("WRITING==============\n");
-    char buf[LWS_PRE + StringLength(json)];
-    memcpy(&buf[LWS_PRE], json, StringLength(json));
-    lws_write(lwsTrade, (unsigned char *)&buf[LWS_PRE], StringLength(json), LWS_WRITE_TEXT);
+    // char buf[LWS_PRE + StringLength(json)];
+    // memcpy(&buf[LWS_PRE], json, StringLength(json));
+    // lws_write(lwsTrade, (unsigned char *)&buf[LWS_PRE], StringLength(json), LWS_WRITE_TEXT);
+    struct per_session_data__minimal *pss = 
+        (struct per_session_data__minimal *)lws_wsi_user(lwsTrade);
+    queue_message_to_send(lwsTrade, pss, json);
     yyjson_mut_doc_free(doc);
     return 0;
 }
