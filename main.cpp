@@ -295,8 +295,9 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
 
     switch (reason) {
 
-    case LWS_CALLBACK_SERVER_WRITEABLE:
+        case LWS_CALLBACK_CLIENT_WRITEABLE:
             {
+                printf("WRITEABLE=========\n");
                 // 1. Check if we actually have data left to send
                 if (!pss || !pss->buffer || pss->ptr >= pss->len) {
                     break;
@@ -332,7 +333,18 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                 break;
             }
 
-    case LWS_CALLBACK_CLOSED:
+        case LWS_CALLBACK_CLIENT_RECEIVE:
+            {
+                ((char *)in)[len] = '\0';
+                Assert(len <= 4096)
+                char buf[4096];
+                memcpy(buf, in, len);
+                buf[len] = '\0';
+                printf("Trade RESPONSE========= %d '%s'\n", (int)len, buf);
+                break;
+            }
+
+        case LWS_CALLBACK_CLOSED:
             {
                 // Clean up memory if the client disconnects before transmission completes
                 if (pss && pss->buffer) {
@@ -342,8 +354,8 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                 break;
             }
 
-    default:
-        break;
+        default:
+            break;
     }
 
     return 0;
@@ -1087,7 +1099,6 @@ static struct lws_protocols protocols[] = {
         CallbackBinanceTrade,
         sizeof(struct per_session_data__minimal),
         1024,
-        0, NULL, 0
     },
     { NULL, NULL, 0, 0 }    // Terminator - ALWAYS REQUIRED
 };
@@ -1420,11 +1431,7 @@ main()
         return -1;
     }
     /* connect the websocket to binance orderbook */
-    struct lws_protocols protocol = {};
-    protocol.name = "binance";
-    protocol.callback = CallbackBinance;
-    protocol.per_session_data_size = 256;
-
+    
     struct lws_client_connect_info ccinfo = {};
     ccinfo.context = context;
     ccinfo.address = MARKET_BASE_ENDP;
@@ -1444,12 +1451,7 @@ main()
         return -1;
     }
 
-    /* connect the websocket to binance trade */
-    struct lws_protocols protocolTrade = {};
-    protocol.name = "binanceTrade";
-    protocol.callback = CallbackBinanceTrade;
-    protocol.per_session_data_size = 256;
-
+    /* connect the websocket to binance trade api*/
     struct lws_client_connect_info ccinfoTrade = {};
     ccinfoTrade.context = context;
     ccinfoTrade.address = TRADE_BASE_ENDP;
@@ -1461,7 +1463,8 @@ main()
     ccinfoTrade.ssl_connection = LCCSCF_USE_SSL;
     ccinfoTrade.ietf_version_or_minus_one = -1;
     ccinfoTrade.protocol = "binance-trade";
-    ccinfoTrade.userdata = (void *)&state;
+    struct per_session_data__minimal pss = {}; 
+    ccinfoTrade.userdata = (void *)&pss;
     struct lws *lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
     if (lwsTrade == NULL)
     {
