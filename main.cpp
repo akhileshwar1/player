@@ -172,6 +172,7 @@ typedef struct
     real64 sellPressure;
     real64 buyPressureParent;
     real64 sellPressureParent;
+    real64 SL; /* stop loss in absolute value */
     timespec lastTime;
     timespec lastTimeParent;
     bool isOpen;
@@ -1324,11 +1325,27 @@ cancelOrder(Order *order, struct lws *lwsTrade)
     char *json = yyjson_mut_write(doc, 0, NULL);
     printf("json is %s\n", json);
     printf("WRITING CANCEL==============\n");
-    char bufCancel[LWS_PRE + StringLength(json)];
-    memcpy(&bufCancel[LWS_PRE], json, StringLength(json));
-    lws_write(lwsTrade, (unsigned char *)&bufCancel[LWS_PRE], StringLength(json), LWS_WRITE_TEXT);
+    // char bufCancel[LWS_PRE + StringLength(json)];
+    // memcpy(&bufCancel[LWS_PRE], json, StringLength(json));
+    // lws_write(lwsTrade, (unsigned char *)&bufCancel[LWS_PRE], StringLength(json), LWS_WRITE_TEXT);
+    struct per_session_data__minimal *pss = 
+        (struct per_session_data__minimal *)lws_wsi_user(lwsTrade);
+    queue_message_to_send(lwsTrade, pss, json);
     yyjson_mut_doc_free(doc);
     return 0;
+}
+
+void
+cancelAllOrders(State *state, struct lws *lwsTrade)
+{
+    for (int i = 0; i < MAX_ORDERS; i++)
+    {
+        if (0 != strcmp(state->orders[i].id, ""))
+        {
+            cancelOrder(&state->orders[i], lwsTrade);
+            state->currOrderIndex--;
+        }
+    }
 }
 
 int
@@ -1380,6 +1397,7 @@ main()
     clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
     state.lastTime = endTime;
     state.currOrderIndex = -1;
+    state.SL = 4;
     // | LLL_DEBUG
     // lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO, NULL); 
     printf("running\n");
@@ -1505,86 +1523,66 @@ main()
 
            The point of refresh is on a pair, we refresh the 
            pair to get it higher up the queue on the exchange */ 
-        quote bestQ = getBestQuote(&state.OrderBook);
-        real64 quantity = 0.01;
-        Order order = {};
-        order.price = bestQ.price;
-        order.qty = 0.2;
-        order.coin = (char *)"SOLUSDT"; 
-        order.side = BUY; 
-        order.type = LIMIT; 
-        order.status = PENDING; 
-        int res = sendOrder(&order, lwsTrade);
-
-        if(loopcount == 50)
+        
+        if (state.position.qty == 0)
         {
-            int res = cancelOrder(&order, lwsTrade);
+            /* check if refresh and
+               create the pair of orders with the target spread. */
+            timespec endTime;
+            clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
+            real64 timeElapsedMS = XtimeElapsedMS(
+                state.lastTime,
+                endTime
+            );
+            if (timeElapsedMS > MIN_REFRESH_TIME)
+            {
+                printf("TIME ELAPSED=====\n");
+                cancelAllOrders(&state, lwsTrade);
+                // createNewPair(state.orders);
+                Order buyOrder = {};
+                Order sellOrder = {};
+                buyOrder.coin = (char *)"SOLUSDT";
+                buyOrder.side = BUY;
+                buyOrder.type = LIMIT;
+                buyOrder.qty = 0.1;
+                buyOrder.price = state.OrderBook.bids[SPREAD_LEVEL].price; 
+                buyOrder.status = PENDING; 
+                sellOrder.coin = (char *)"SOLUSDT";
+                sellOrder.side = SELL;
+                sellOrder.type = LIMIT;
+                sellOrder.qty = 0.1;
+                sellOrder.price = state.OrderBook.asks[SPREAD_LEVEL].price;
+                sellOrder.status = PENDING; 
+                int res = sendOrder(&buyOrder, lwsTrade);
+                res = sendOrder(&sellOrder, lwsTrade);
+                state.orders[++state.currOrderIndex] = buyOrder;
+                state.orders[++state.currOrderIndex] = sellOrder;
+            }
         }
-        // if (state.position.qty != 0)
-        // {
-        //     /* check if refresh and
-        //        create the pair of orders with the target spread. */
-        //     timespec endTime;
-        //     clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
-        //     real64 timeElapsedMS = XtimeElapsedMS(
-        //         state.lastTime,
-        //         endTime
-        //     );
-        //     if (timeElapsedMS > MIN_REFRESH_TIME)
-        //     {
-        //         cancelAllOrders(state.orders);
-        //         // createNewPair(state.orders);
-        //         Order buyOrder = {};
-        //         Order sellOrder = {};
-        //         buyOrder.coin = (char *)"SOLUSDT";
-        //         buyOrder.side = BUY;
-        //         buyOrder.type = LIMIT;
-        //         buyOrder.qty = 0.1;
-        //         buyOrder.price = state.OrderBook.bids[SPREAD_LEVEL].price; 
-        //         buyOrder.status = PENDING; 
-        //         sellOrder.coin = (char *)"SOLUSDT";
-        //         sellOrder.side = SELL;
-        //         sellOrder.type = LIMIT;
-        //         sellOrder.qty = 0.1;
-        //         sellOrder.price = state.OrderBook.asks[SPREAD_LEVEL].price;
-        //         sellOrder.status = PENDING; 
-        //         char body[1024];
-        //         uint64 timestamp = BinanceTimestamp();
-        //         sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
-        //                 buyOrder.coin,
-        //                 (buyOrder.side == BUY) ? "BUY" : "SELL",
-        //                 (buyOrder.type == MARKET) ? "MARKET" : "LIMIT",
-        //                 buyOrder.qty,
-        //                 timestamp);
-        //         printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
-        //         bool res = BinanceMakeOrder(body);
-        //         sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
-        //                 sellOrder.coin,
-        //                 (sellOrder.side == BUY) ? "BUY" : "SELL",
-        //                 (sellOrder.type == MARKET) ? "MARKET" : "LIMIT",
-        //                 sellOrder.qty,
-        //                 timestamp);
-        //         printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
-        //         res = BinanceMakeOrder(body);
-        //
-        //         state.orders[++state.currOrderIndex] = buyOrder;
-        //         state.orders[++state.currOrderIndex] = sellOrder;
-        //     }
-        //
-        //
-        // }
-        // else
-        // {
-        //     /* update the position's pnl and if >= sl, cancel 
-        //        the other order */
-        //     real64 ltp = getLTP(state->OrderBook);
-        //     state.position.ltp = ltp;
-        //     state.position.pnl = (ltp - state.position.price) * state.position.qty;
-        //     if (state.position.pnl < 0 && abs(state.position.pnl) >= state.SL)
-        //     {
-        //         cancelAllOrders(state.orders);
-        //     }
-        // } 
+        else
+        {
+            printf("CHECKING SL======\n");
+            /* update the position's pnl and if >= sl, cancel 
+               the other order */
+            quote bestQ = getBestQuote(&state.OrderBook);
+            real64 ltp = bestQ.price;
+            state.position.ltp = ltp;
+            state.position.pnl = (ltp - state.position.price) * state.position.qty;
+            if (state.position.pnl < 0 && abs(state.position.pnl) >= state.SL)
+            {
+                printf("SL HIT ======\n");
+                /* close the position and cancel all orders */
+                Order closeOrder = {};
+                closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
+                closeOrder.type = MARKET;
+                closeOrder.qty = state.position.qty;
+                closeOrder.status = PENDING;
+                strcpy(closeOrder.coin, state.position.symbol);
+                int res = sendOrder(&closeOrder, lwsTrade);
+                if (res < 0) printf("couldn't close order \n");
+                cancelAllOrders(&state, lwsTrade);
+            }
+        }
 
         // apply the event to the order book in the callback, if the OB is ready.
         lws_service(context, 0);

@@ -2,7 +2,7 @@
 set -e
 
 # Build platform executable.
-gcc \
+g++ \
     -g -O0 \
     -Wall -Wextra \
     -fsanitize=address \
@@ -11,5 +11,6 @@ gcc \
     -lwebsockets \
     -lyyjson \
     -lcurl \
+    -luuid \
     -lcrypto \
     -o player.out \
