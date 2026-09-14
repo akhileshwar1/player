@@ -1261,11 +1261,13 @@ sendOrder(Order *order, struct lws *lwsTrade)
     yyjson_mut_val *params = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_str(doc, params, "apiKey", getenv("API_KEY"));
     yyjson_mut_obj_add_float(doc, params, "price", order->price);
-    yyjson_mut_obj_add_float(doc, params, "quantity", order->qty);
+    char qtyStr[32]; /* to match teh %.2f in body formatting below */
+    snprintf(qtyStr, sizeof(qtyStr), "%.2f", order->qty);
+    yyjson_mut_obj_add_val(doc, params, "quantity", yyjson_mut_raw(doc, qtyStr)); 
     yyjson_mut_obj_add_str(doc, params, "side", OrderSideString[order->side]);
     /* NOTE(AKHIL): for the signature to pass, the params should be sorted
-         *              alphabetically, and the price and quantities should be 
-         *              same in query string and params json to the decimal point */
+     *              alphabetically, and the price and quantities should be 
+     *              same in query string and params json to the decimal point */
     uint64 timestamp = BinanceTimestamp();
     char body[1024];
     snprintf(body,
