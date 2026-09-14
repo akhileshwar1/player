@@ -785,8 +785,8 @@ CallbackBinance(struct lws *wsi,
             {
                 ((char *)in)[len] = '\0';
                 State *state = ((State *)user);
-                Assert(len <= 4096)
-                char buf[4096];
+                Assert(len <= 4096 * 10)
+                char buf[4096 * 10];
                 memcpy(buf, in, len);
                 buf[len] = '\0';
                 printf("rx %d '%s'\n", (int)len, buf);
@@ -796,7 +796,7 @@ CallbackBinance(struct lws *wsi,
                 bool isComplete = IsEventComplete(buf);
                 if (!isComplete)
                 {
-                    Assert(StringLength(state->event) + StringLength(buf) < 4096)
+                    Assert(StringLength(state->event) + StringLength(buf) < 4096 * 10)
                     StringCat(state->event, buf);
                 }
                 else
@@ -1529,18 +1529,20 @@ main()
            The point of refresh is on a pair, we refresh the 
            pair to get it higher up the queue on the exchange */ 
         
+        timespec endTime;
+        clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
         if (state.position.qty == 0)
         {
             /* check if refresh and
                create the pair of orders with the target spread. */
-            timespec endTime;
-            clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
             real64 timeElapsedMS = XtimeElapsedMS(
                 state.lastTime,
                 endTime
             );
+            printf("time elapsed is %f\n", timeElapsedMS);
             if (timeElapsedMS > MIN_REFRESH_TIME)
             {
+                state.lastTime = endTime;
                 printf("TIME ELAPSED=====\n");
                 cancelAllOrders(&state, lwsTrade);
                 // createNewPair(state.orders);
