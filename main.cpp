@@ -8,6 +8,7 @@
 #include <openssl/evp.h>
 #include <malloc.h>
 #include <uuid/uuid.h>
+#include "channel.h"
 
 #define ArrayCount(Array) (sizeof(Array) / sizeof(Array[0]))
 #define Assert(Expression) if(!(Expression)) {*(int *)0 = 0;}
@@ -197,6 +198,15 @@ struct per_session_data__minimal {
     size_t ptr;           // Current read position in the buffer
 };
 
+typedef struct
+{
+    Channel *channel;
+
+    struct lws_context *context;
+    struct lws *wsi;
+
+    struct per_session_data__minimal *pss;
+} TradeThreadArgs;
 
 const char* OrderSideString[] =
     {
@@ -715,7 +725,7 @@ bool BinanceMakeOrder(char *body) {
     struct curl_slist *headers = NULL;
 
     char key_header[128];
-    snprintf(key_header, sizeof(key_header), "X-MBX-APIKEY: %s", getenv("API_KEY"));
+    snprintf(key_header, sizeof(key_header), "X-MBX-APIKEY: %s", getenv("API_KEY_SUB"));
     headers = curl_slist_append(headers, key_header);
 
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -727,7 +737,7 @@ bool BinanceMakeOrder(char *body) {
     // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeDataBinanceOrder);
 
-    generate_signature(body, getenv("API_SECRET"), signature);
+    generate_signature(body, getenv("API_SECRET_SUB"), signature);
     snprintf(signed_body, sizeof(signed_body), "%s&signature=%s", body, signature);
 
     char tradeUrl[1024];
@@ -1244,8 +1254,12 @@ generateUUID(char *uuidStr)
 }
 
 int
-sendOrder(Order *order, struct lws *lwsTrade)
+sendOrder(Order *order, Channel *tradeChannel)
 {
+    char priceStr[32];
+    char qtyStr[32];
+    snprintf(priceStr, sizeof(priceStr), "%.2f", order->price);
+    snprintf(qtyStr, sizeof(qtyStr), "%.2f", order->qty);
     char uuidStr[37];
     generateUUID(uuidStr);
     strcpy(order->id, uuidStr);
@@ -1259,11 +1273,13 @@ sendOrder(Order *order, struct lws *lwsTrade)
     yyjson_mut_obj_add_str(doc, root, "id", uuidStr);
     yyjson_mut_obj_add_str(doc, root, "method", "order.place");
     yyjson_mut_val *params = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, params, "apiKey", getenv("API_KEY"));
-    yyjson_mut_obj_add_float(doc, params, "price", order->price);
-    char qtyStr[32]; /* to match teh %.2f in body formatting below */
-    snprintf(qtyStr, sizeof(qtyStr), "%.2f", order->qty);
-    yyjson_mut_obj_add_val(doc, params, "quantity", yyjson_mut_raw(doc, qtyStr)); 
+    yyjson_mut_obj_add_str(doc, params, "apiKey", getenv("API_KEY_SUB"));
+    yyjson_mut_obj_add_str(doc, params, "price", priceStr);
+    // yyjson_mut_obj_add_float(doc, params, "price", order->price);
+    yyjson_mut_obj_add_str(doc, params, "quantity", qtyStr);
+    // char qtyStr[32]; /* to match teh %.2f in body formatting below */
+    // snprintf(qtyStr, sizeof(qtyStr), "%.2f", order->qty);
+    // yyjson_mut_obj_add_val(doc, params, "quantity", yyjson_mut_raw(doc, qtyStr)); 
     yyjson_mut_obj_add_str(doc, params, "side", OrderSideString[order->side]);
     /* NOTE(AKHIL): for the signature to pass, the params should be sorted
      *              alphabetically, and the price and quantities should be 
@@ -1272,10 +1288,10 @@ sendOrder(Order *order, struct lws *lwsTrade)
     char body[1024];
     snprintf(body,
              sizeof(body),
-             "apiKey=%s&price=%.2f&quantity=%.2f&side=%s&symbol=%s&timeInForce=%s&timestamp=%lu&type=%s",
-             getenv("API_KEY"),
-             order->price,
-             order->qty,
+             "apiKey=%s&price=%s&quantity=%s&side=%s&symbol=%s&timeInForce=%s&timestamp=%lu&type=%s",
+             getenv("API_KEY_SUB"),
+             priceStr,
+             qtyStr,
              OrderSideString[order->side],
              order->coin,
              "GTC",
@@ -1283,7 +1299,7 @@ sendOrder(Order *order, struct lws *lwsTrade)
              OrderTypeString[order->type]); 
     printf("body is %s\n", body);
     char signature[2048];
-    generate_signature(body, getenv("API_SECRET"), signature);
+    generate_signature(body, getenv("API_SECRET_SUB"), signature);
     yyjson_mut_obj_add_str(doc, params, "signature", signature);
     yyjson_mut_obj_add_str(doc, params, "symbol", order->coin);
     yyjson_mut_obj_add_str(doc, params, "timeInForce", "GTC");
@@ -1296,15 +1312,13 @@ sendOrder(Order *order, struct lws *lwsTrade)
     // char buf[LWS_PRE + StringLength(json)];
     // memcpy(&buf[LWS_PRE], json, StringLength(json));
     // lws_write(lwsTrade, (unsigned char *)&buf[LWS_PRE], StringLength(json), LWS_WRITE_TEXT);
-    struct per_session_data__minimal *pss = 
-        (struct per_session_data__minimal *)lws_wsi_user(lwsTrade);
-    queue_message_to_send(lwsTrade, pss, json);
+    ChannelPut(tradeChannel, json);
     yyjson_mut_doc_free(doc);
     return 0;
 }
 
 int
-cancelOrder(Order *order, struct lws *lwsTrade)
+cancelOrder(Order *order, Channel *tradeChannel)
 {
     char uuidStr[37];
     /* cancel that order */
@@ -1315,22 +1329,22 @@ cancelOrder(Order *order, struct lws *lwsTrade)
     generateUUID(uuidStr);
     // Set root["name"] and root["star"]
     yyjson_mut_obj_add_str(doc, root, "id", uuidStr);
-    yyjson_mut_obj_add_str(doc, root, "method", "order->cancel");
+    yyjson_mut_obj_add_str(doc, root, "method", "order.cancel");
     yyjson_mut_val *params = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, params, "apiKey", getenv("API_KEY"));
+    yyjson_mut_obj_add_str(doc, params, "apiKey", getenv("API_KEY_SUB"));
     yyjson_mut_obj_add_str(doc, params, "origClientOrderId", order->id);
     uint64 timestamp = BinanceTimestamp();
     char body[1024];
     snprintf(body,
              sizeof(body),
              "apiKey=%s&origClientOrderId=%s&symbol=%s&timestamp=%lu",
-             getenv("API_KEY"),
+             getenv("API_KEY_SUB"),
              order->id,
              order->coin,
              timestamp);
     printf("body is %s\n", body);
     char signature[2048];
-    generate_signature(body, getenv("API_SECRET"), signature);
+    generate_signature(body, getenv("API_SECRET_SUB"), signature);
     yyjson_mut_obj_add_str(doc, params, "signature", signature);
     yyjson_mut_obj_add_str(doc, params, "symbol", order->coin);
     yyjson_mut_obj_add_int(doc, params, "timestamp", timestamp);
@@ -1341,29 +1355,77 @@ cancelOrder(Order *order, struct lws *lwsTrade)
     // char bufCancel[LWS_PRE + StringLength(json)];
     // memcpy(&bufCancel[LWS_PRE], json, StringLength(json));
     // lws_write(lwsTrade, (unsigned char *)&bufCancel[LWS_PRE], StringLength(json), LWS_WRITE_TEXT);
-    struct per_session_data__minimal *pss = 
-        (struct per_session_data__minimal *)lws_wsi_user(lwsTrade);
-    queue_message_to_send(lwsTrade, pss, json);
+    ChannelPut(tradeChannel, json);
     yyjson_mut_doc_free(doc);
     return 0;
 }
 
 void
-cancelAllOrders(State *state, struct lws *lwsTrade)
+cancelAllOrders(State *state, Channel *tradeChannel)
 {
     for (int i = 0; i < MAX_ORDERS; i++)
     {
         if (0 != strcmp(state->orders[i].id, ""))
         {
-            cancelOrder(&state->orders[i], lwsTrade);
+            cancelOrder(&state->orders[i], tradeChannel);
             state->currOrderIndex--;
         }
     }
 }
 
+static void *
+tradeThread(void *arg)
+{
+    TradeThreadArgs *args = (TradeThreadArgs *)arg;
+
+    while (1)
+    {
+        /*
+         * Only take a new message if pss isn't
+         * already holding one.
+         */
+        if (args->pss->buffer == NULL)
+        {
+            char *message =
+                (char *)ChannelTake(args->channel);
+
+            if (message != NULL)
+            {
+                size_t len = strlen(message);
+
+                args->pss->buffer =
+                    (unsigned char *)malloc(LWS_PRE + len);
+
+                memcpy(
+                    &args->pss->buffer[LWS_PRE],
+                    message,
+                    len
+                );
+
+                args->pss->len = len;
+                args->pss->ptr = 0;
+
+                free(message);
+
+                lws_callback_on_writable(args->wsi);
+            }
+        }
+
+        /*
+         * This is what actually drives LWS and
+         * eventually invokes CLIENT_WRITEABLE.
+         */
+        lws_service(args->context, 0);
+    }
+
+    return NULL;
+}
+
 int
 main()
 {
+    Channel tradeChannel;
+    ChannelInit(&tradeChannel);
     CURLcode res = curl_global_init(CURL_GLOBAL_ALL);
     if (res != CURLE_OK) {
         printf("curl setup failed, abort!");
@@ -1474,6 +1536,22 @@ main()
         return -1;
     }
     uint16 loopcount = 0;
+    TradeThreadArgs tradeArgs = {
+        .channel = &tradeChannel,
+        .context = context,
+        .wsi = lwsTrade,
+        .pss = &pss
+    };
+
+    pthread_t tradeThreadId;
+
+    pthread_create(
+        &tradeThreadId,
+        NULL,
+        tradeThread,
+        &tradeArgs
+    ); 
+
     while(1)
     {
         if (state.MarketEventsBuffer.currentWriteIndex > 0 &&
@@ -1544,7 +1622,7 @@ main()
             {
                 state.lastTime = endTime;
                 printf("TIME ELAPSED=====\n");
-                cancelAllOrders(&state, lwsTrade);
+                cancelAllOrders(&state, &tradeChannel);
                 // createNewPair(state.orders);
                 Order buyOrder = {};
                 Order sellOrder = {};
@@ -1560,8 +1638,8 @@ main()
                 sellOrder.qty = 0.1;
                 sellOrder.price = state.OrderBook.asks[SPREAD_LEVEL].price;
                 sellOrder.status = PENDING; 
-                int res = sendOrder(&buyOrder, lwsTrade);
-                res = sendOrder(&sellOrder, lwsTrade);
+                int res = sendOrder(&buyOrder, &tradeChannel);
+                res = sendOrder(&sellOrder, &tradeChannel);
                 state.orders[++state.currOrderIndex] = buyOrder;
                 state.orders[++state.currOrderIndex] = sellOrder;
             }
@@ -1585,9 +1663,9 @@ main()
                 closeOrder.qty = state.position.qty;
                 closeOrder.status = PENDING;
                 strcpy(closeOrder.coin, state.position.symbol);
-                int res = sendOrder(&closeOrder, lwsTrade);
+                int res = sendOrder(&closeOrder, &tradeChannel);
                 if (res < 0) printf("couldn't close order \n");
-                cancelAllOrders(&state, lwsTrade);
+                cancelAllOrders(&state, &tradeChannel);
             }
         }
 

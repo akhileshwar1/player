@@ -1,16 +1,17 @@
 #!/bin/sh
 set -e
 
-# Build platform executable.
 g++ \
     -g -O0 \
     -Wall -Wextra \
     -fsanitize=address \
     -DPLAYER_DEBUG=1 \
     main.cpp \
+    channel.c \
     -lwebsockets \
     -lyyjson \
     -lcurl \
     -luuid \
     -lcrypto \
-    -o player.out \
+    -pthread \
+    -o player.out
