@@ -1388,6 +1388,7 @@ tradeThread(void *arg)
         {
             char *message =
                 (char *)ChannelTake(args->channel);
+            printf("Taken message is %s\n", message);
 
             if (message != NULL)
             {
@@ -1414,6 +1415,8 @@ tradeThread(void *arg)
         /*
          * This is what actually drives LWS and
          * eventually invokes CLIENT_WRITEABLE.
+         * this actually also drives the events for
+         * order book, same context eh
          */
         lws_service(args->context, 0);
     }
@@ -1528,6 +1531,7 @@ main()
     ccinfoTrade.ietf_version_or_minus_one = -1;
     ccinfoTrade.protocol = "binance-trade";
     struct per_session_data__minimal pss = {}; 
+    pss.buffer = NULL;
     ccinfoTrade.userdata = (void *)&pss;
     struct lws *lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
     if (lwsTrade == NULL)
@@ -1670,7 +1674,7 @@ main()
         }
 
         // apply the event to the order book in the callback, if the OB is ready.
-        lws_service(context, 0);
+        // lws_service(context, 0);
 
         PrintOrderBook(&state);
         // PrintTradeState(&state);
