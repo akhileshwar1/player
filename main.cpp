@@ -8,7 +8,9 @@
 #include <openssl/evp.h>
 #include <malloc.h>
 #include <uuid/uuid.h>
+#include <time.h>
 #include "channel.h"
+#include "log.h"
 
 #define ArrayCount(Array) (sizeof(Array) / sizeof(Array[0]))
 #define Assert(Expression) if(!(Expression)) {*(int *)0 = 0;}
@@ -154,6 +156,7 @@ typedef struct
     Order_type type;
     Order_status status;
     Side side;
+    uint64 timestamp;
 } Order;
 
 typedef struct timespec timespec;
@@ -175,6 +178,7 @@ typedef struct
     real64 sellPressureParent;
     real64 SL; /* stop loss in absolute value */
     timespec lastTime;
+    timespec lastTimeDashboard;
     timespec lastTimeParent;
     bool isOpen;
     bool AreEventsApplied;
@@ -196,6 +200,7 @@ struct per_session_data__minimal {
     unsigned char *buffer; // Pointer to the data to be sent
     size_t len;           // Total length of data remaining
     size_t ptr;           // Current read position in the buffer
+    State *state;
 };
 
 typedef struct
@@ -207,6 +212,67 @@ typedef struct
 
     struct per_session_data__minimal *pss;
 } TradeThreadArgs;
+
+static const char *
+SideString(Side side)
+{
+    switch (side)
+    {
+        case BUY:  return "BUY";
+        case SELL: return "SELL";
+        default:   return "?";
+    }
+}
+
+// static const char *
+// OrderTypeString(Order_type type)
+// {
+//     switch (type)
+//     {
+//         case OPENBUY:   return "OPENBUY";
+//         case OPENSELL:  return "OPENSELL";
+//         case LOADBUY:   return "LOADBUY";
+//         case LOADSELL:  return "LOADSELL";
+//         case CLOSELONG: return "CLOSELONG";
+//         case CLOSESHORT:return "CLOSESHORT";
+//         case MARKET:    return "MARKET";
+//         case LIMIT:     return "LIMIT";
+//         default:        return "?";
+//     }
+// }
+
+static const char *
+OrderStatusString(Order_status status)
+{
+    switch (status)
+    {
+        case PENDING:   return "PENDING";
+        case COMPLETED: return "COMPLETED";
+        case CANCELLED: return "CANCELLED";
+        default:        return "?";
+    }
+}
+
+static void
+PrintTimestamp(uint64 timestamp)
+{
+    time_t seconds = timestamp / 1000;
+
+    struct tm tm_time;
+
+    localtime_r(&seconds, &tm_time);
+
+    char buf[32];
+
+    strftime(
+        buf,
+        sizeof(buf),
+        "%H:%M:%S",
+        &tm_time
+    );
+
+    LogInfo("%s", buf);
+}
 
 const char* OrderSideString[] =
     {
@@ -233,14 +299,25 @@ void formatMSTimestamp(uint64_t ms_timestamp, char *out_buf, size_t buf_sz) {
 
     struct tm *tm_info = gmtime(&seconds);
     if (!tm_info) {
-        snprintf(out_buf, buf_sz, "Invalid Time");
+        LogInfo(out_buf, buf_sz, "Invalid Time");
         return;
     }
 
     char temp[26];
     strftime(temp, sizeof(temp), "%Y-%m-%d %H:%M:%S", tm_info);
 
-    snprintf(out_buf, buf_sz, "%s.%03d", temp, millis);
+    LogInfo(out_buf, buf_sz, "%s.%03d", temp, millis);
+}
+
+long long XgetTimestamp()
+{
+    timespec ts;
+    
+    // CLOCK_REALTIME measures wall-clock time since the Epoch
+    clock_gettime(CLOCK_REALTIME, &ts); 
+    
+    long long milliseconds = ((long long)ts.tv_sec * 1000) + (ts.tv_nsec / 1000000);
+    return milliseconds;
 }
 
 real64 XtimeElapsedMS (timespec lastTime, timespec endTime) {
@@ -295,6 +372,129 @@ char
     return buffer;
 }
 
+static const char *
+BinanceOrderStatusString(Order_status status)
+{
+    switch (status)
+    {
+        case PENDING:   return "PENDING";
+        case COMPLETED: return "COMPLETED";
+        case CANCELLED: return "CANCELLED";
+        default:        return "UNKNOWN";
+    }
+}
+
+
+static void
+UpdateOrderFromBinance(
+    State *state,
+    yyjson_val *result
+)
+{
+    yyjson_val *clientOrderId =
+        yyjson_obj_get(result, "clientOrderId");
+
+    yyjson_val *origClientOrderId =
+        yyjson_obj_get(result, "origClientOrderId");
+
+    yyjson_val *status =
+        yyjson_obj_get(result, "status");
+
+    if (!status)
+    {
+        LogError("Binance order response missing status");
+        return;
+    }
+
+    const char *binanceStatus =
+        yyjson_get_str(status);
+
+    if (!binanceStatus)
+    {
+        LogError("Invalid Binance order status");
+        return;
+    }
+
+    /*
+     * For a cancel response, origClientOrderId refers
+     * to the clientOrderId of the order being cancelled.
+     *
+     * For a normal order.place response, clientOrderId
+     * identifies the newly placed order.
+     */
+    const char *localOrderId = NULL;
+
+    if (strcmp(binanceStatus, "CANCELED") == 0 &&
+        origClientOrderId)
+    {
+        localOrderId = yyjson_get_str(origClientOrderId);
+    }
+    else if (clientOrderId)
+    {
+        localOrderId = yyjson_get_str(clientOrderId);
+    }
+
+    if (!localOrderId)
+    {
+        LogError(
+            "Couldn't determine local order ID from Binance response"
+        );
+        return;
+    }
+
+    /*
+     * Find our local order.
+     */
+    for (int i = 0; i <= state->currOrderIndex; i++)
+    {
+        Order *order = &state->orders[i];
+
+        if (strcmp(order->id, localOrderId) != 0)
+            continue;
+
+        /*
+         * Translate Binance status into our local status.
+         */
+        if (strcmp(binanceStatus, "NEW") == 0 ||
+            strcmp(binanceStatus, "PARTIALLY_FILLED") == 0)
+        {
+            order->status = PENDING;
+        }
+        else if (strcmp(binanceStatus, "FILLED") == 0)
+        {
+            order->status = COMPLETED;
+        }
+        else if (strcmp(binanceStatus, "CANCELED") == 0 ||
+                 strcmp(binanceStatus, "EXPIRED") == 0 ||
+                 strcmp(binanceStatus, "REJECTED") == 0)
+        {
+            order->status = CANCELLED;
+        }
+        else
+        {
+            LogWarn(
+                "Unknown Binance order status '%s' for %s",
+                binanceStatus,
+                localOrderId
+            );
+            return;
+        }
+
+        LogInfo(
+            "Order %s -> %s",
+            order->id,
+            binanceStatus
+        );
+
+        return;
+    }
+
+    LogWarn(
+        "Received Binance response for unknown order %s",
+        localOrderId
+    );
+}
+
 static int
 CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                      void *user, void *in, size_t len)
@@ -307,7 +507,7 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
 
         case LWS_CALLBACK_CLIENT_WRITEABLE:
             {
-                printf("WRITEABLE=========\n");
+                LogInfo("WRITEABLE=========\n");
                 // 1. Check if we actually have data left to send
                 if (!pss || !pss->buffer || pss->ptr >= pss->len) {
                     break;
@@ -345,14 +545,98 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
 
         case LWS_CALLBACK_CLIENT_RECEIVE:
             {
-                ((char *)in)[len] = '\0';
-                Assert(len <= 4096)
+                Assert(len <= 4096);
+
                 char buf[4096];
+
                 memcpy(buf, in, len);
                 buf[len] = '\0';
-                printf("Trade RESPONSE========= %d '%s'\n", (int)len, buf);
+
+                LogInfo("Trade RESPONSE %d '%s'", (int)len, buf);
+
+                yyjson_doc *doc =
+                    yyjson_read(buf, len, 0);
+
+                if (!doc)
+                {
+                    LogError("Couldn't parse Binance trade response");
+                    break;
+                }
+
+                yyjson_val *root =
+                    yyjson_doc_get_root(doc);
+
+                yyjson_val *status =
+                    yyjson_obj_get(root, "status");
+
+                if (!status)
+                {
+                    LogError("Binance response has no status");
+                    yyjson_doc_free(doc);
+                    break;
+                }
+
+                /*
+     * HTTP/WebSocket RPC status.
+     *
+     * Example:
+     *
+     * {
+     *   "id": "...",
+     *   "status": 200,
+     *   "result": {
+     *       "orderId": 123,
+     *       "clientOrderId": "...",
+     *       "status": "CANCELED"
+     *   }
+     * }
+     */
+
+                int responseStatus =
+                    (int)yyjson_get_int(status);
+
+                if (responseStatus != 200)
+                {
+                    yyjson_val *error =
+                        yyjson_obj_get(root, "error");
+
+                    if (error)
+                    {
+                        yyjson_val *msg =
+                            yyjson_obj_get(error, "msg");
+
+                        if (msg)
+                        {
+                            LogError(
+                                "Binance order error: %s",
+                                yyjson_get_str(msg)
+                            );
+                        }
+                    }
+
+                    yyjson_doc_free(doc);
+                    break;
+                }
+
+                yyjson_val *result =
+                    yyjson_obj_get(root, "result");
+
+                if (!result)
+                {
+                    LogError("Binance response has no result");
+                    yyjson_doc_free(doc);
+                    break;
+                }
+
+                UpdateOrderFromBinance(
+                    pss->state,
+                    result
+                );
+
+                yyjson_doc_free(doc);
+
                 break;
-            }
+            } 
 
         case LWS_CALLBACK_CLOSED:
             {
@@ -410,7 +694,7 @@ AddLevelsToEvent(yyjson_val *val, quote *quotes)
             float f = strtod(str, &endptr);
             if (str == endptr)
             {
-                printf("Failed str to float conversion\n");
+                LogInfo("Failed str to float conversion\n");
             }
             if (j == 0)
             {
@@ -420,7 +704,7 @@ AddLevelsToEvent(yyjson_val *val, quote *quotes)
             {
                 q.quantity = f;
             }
-            // printf("q %d, %f\n", (int)j, f);
+            // LogInfo("q %d, %f\n", (int)j, f);
         }
 
         quotes[idx] = q;
@@ -461,7 +745,7 @@ LoadMarketEvent(yyjson_doc *doc, Market_event *event)
     event->U = (uint64)yyjson_get_int(U);
     yyjson_val *b = yyjson_obj_get(root, "b");
     yyjson_val *a = yyjson_obj_get(root, "a");
-    printf("event type is %s\n", yyjson_get_str(e));
+    LogInfo("event type is %s\n", yyjson_get_str(e));
     AddLevelsToEvent(a, event->asks);
     AddLevelsToEvent(b, event->bids);
     yyjson_doc_free(doc);
@@ -477,7 +761,7 @@ BufferEvent(Market_event marketEvent, Market_events_buffer *marketEventsBuffer)
         marketEventsBuffer->currentWriteIndex = currentWriteIndex % size;
     }
     marketEventsBuffer->buffer[marketEventsBuffer->currentWriteIndex] = marketEvent;
-    printf("Buffered event U %lu at index %u\n",
+    LogInfo("Buffered event U %lu at index %u\n",
            marketEvent.U,
            marketEventsBuffer->currentWriteIndex);
     marketEventsBuffer->currentWriteIndex++;
@@ -495,7 +779,7 @@ BufferTradeEvent(Trade_event tradeEvent, Trade_events_buffer *tradeEventsBuffer)
         tradeEventsBuffer->currentWriteIndex = currentWriteIndex % size;
     }
     tradeEventsBuffer->buffer[tradeEventsBuffer->currentWriteIndex] = tradeEvent;
-    printf("Buffered event at index %u\n",
+    LogInfo("Buffered event at index %u\n",
            tradeEventsBuffer->currentWriteIndex);
     tradeEventsBuffer->currentWriteIndex++;
     tradeEventsBuffer->eventCount++;
@@ -523,7 +807,7 @@ ApplyEvent(Market_event event, Order_book *OrderBook)
                     eventAsk.price == OBAsks[j].price)
                 {
                     removeAt = j;
-                    printf("removing ask at posn %d\n", removeAt);
+                    LogInfo("removing ask at posn %d\n", removeAt);
                     break;
                 }
                 else if (eventAsk.price == OBAsks[j].price)
@@ -537,7 +821,7 @@ ApplyEvent(Market_event event, Order_book *OrderBook)
                           OBAsks[j].price == 0.0))
                 {
                     insertAt = j;
-                    printf("inserting ask at posn %d\n", insertAt);
+                    LogInfo("inserting ask at posn %d\n", insertAt);
                     break;
                 }
             }
@@ -573,7 +857,7 @@ ApplyEvent(Market_event event, Order_book *OrderBook)
                 {
                     if (i == MAX_LEVELS - 1)
                     {
-                        printf("inserting hole at the end\n");
+                        LogInfo("inserting hole at the end\n");
                         OBAsks[i].price = 0.0;
                     }
                     else
@@ -600,7 +884,7 @@ ApplyEvent(Market_event event, Order_book *OrderBook)
                     eventBid.price == OBBids[j].price)
                 {
                     removeAt = j;
-                    printf("removing bid at posn %d\n", removeAt);
+                    LogInfo("removing bid at posn %d\n", removeAt);
                     break;
                 }
                 else if (eventBid.price == OBBids[j].price)
@@ -614,7 +898,7 @@ ApplyEvent(Market_event event, Order_book *OrderBook)
                           OBBids[j].price == 0.0)) 
                 {
                     insertAt = j;
-                    printf("inserting bid at posn %d\n", insertAt);
+                    LogInfo("inserting bid at posn %d\n", insertAt);
                     break;
                 }
             }
@@ -650,7 +934,7 @@ ApplyEvent(Market_event event, Order_book *OrderBook)
                 {
                     if (i == MAX_LEVELS - 1)
                     {
-                        printf("inserting hole at the end\n");
+                        LogInfo("inserting hole at the end\n");
                         OBBids[i].price = 0.0;
                     }
                     else
@@ -706,7 +990,7 @@ writeDataBinanceOrder(void *buffer, size_t size, size_t nmemb, void *userp)
 {
     (void) buffer;
     (void) userp;
-    printf("returned binance order\n");
+    LogInfo("returned binance order\n");
     size_t realsize = size * nmemb;
     return realsize;
 }
@@ -716,7 +1000,7 @@ bool BinanceMakeOrder(char *body) {
     CURL *curl = curl_easy_init(); // Fresh handle
     /* NOTE: THIS LINE BELOW IS IMP FOR THE CALL TO RETURN */
     curl_easy_reset(curl);
-    printf("initialized curl \n");
+    LogInfo("initialized curl \n");
     if(!curl) return false;
     curl_easy_reset(curl);
 
@@ -725,7 +1009,7 @@ bool BinanceMakeOrder(char *body) {
     struct curl_slist *headers = NULL;
 
     char key_header[128];
-    snprintf(key_header, sizeof(key_header), "X-MBX-APIKEY: %s", getenv("API_KEY_SUB"));
+    LogInfo(key_header, sizeof(key_header), "X-MBX-APIKEY: %s", getenv("API_KEY_SUB"));
     headers = curl_slist_append(headers, key_header);
 
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -738,28 +1022,28 @@ bool BinanceMakeOrder(char *body) {
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeDataBinanceOrder);
 
     generate_signature(body, getenv("API_SECRET_SUB"), signature);
-    snprintf(signed_body, sizeof(signed_body), "%s&signature=%s", body, signature);
+    LogInfo(signed_body, sizeof(signed_body), "%s&signature=%s", body, signature);
 
     char tradeUrl[1024];
     StringCpy(tradeUrl, (char *)TRADE_URL);
     StringCat(tradeUrl, signed_body);
-    printf("trade url is %s\n", tradeUrl);
+    LogInfo("trade url is %s\n", tradeUrl);
 
     // Be careful here: Ensure tradeUrl + signed_body < 1024
     curl_easy_setopt(curl, CURLOPT_URL, tradeUrl);
 
     CURLcode result = curl_easy_perform(curl);
-    printf("initialized curl3 \n");
+    LogInfo("initialized curl3 \n");
     if (result == CURLE_OK) {
         long http_code = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
         if (http_code == 200) {
-            printf("Success! Order placed.\n");
+            LogInfo("Success! Order placed.\n");
             return true;
         }
-        printf("API Error! HTTP Status: %ld\n", http_code);
+        LogInfo("API Error! HTTP Status: %ld\n", http_code);
     } else {
-        printf("Transfer failed: %s\n", curl_easy_strerror(result));
+        LogInfo("Transfer failed: %s\n", curl_easy_strerror(result));
     }
 
     // 3. Cleanup headers immediately
@@ -780,15 +1064,15 @@ CallbackBinance(struct lws *wsi,
     switch (reason)
     {
         case LWS_CALLBACK_CLIENT_ESTABLISHED:
-            printf("callback_binance: LWS_CALLBACK_CLIENT_ESTABLISHED\n");
+            LogInfo("callback_binance: LWS_CALLBACK_CLIENT_ESTABLISHED\n");
             break;
 
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-            printf("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
+            LogInfo("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
             break;
 
         case LWS_CALLBACK_CLOSED:
-            printf("LWS_CALLBACK_CLOSED\n");
+            LogInfo("LWS_CALLBACK_CLOSED\n");
             break;
 
         case LWS_CALLBACK_CLIENT_RECEIVE:
@@ -799,7 +1083,7 @@ CallbackBinance(struct lws *wsi,
                 char buf[4096 * 10];
                 memcpy(buf, in, len);
                 buf[len] = '\0';
-                printf("rx %d '%s'\n", (int)len, buf);
+                LogInfo("rx %d '%s'\n", (int)len, buf);
                 Market_event marketEvent = {};
                 // TODO(Akhil): There's a double copy happening here,
                 //              could be simpler.
@@ -817,7 +1101,7 @@ CallbackBinance(struct lws *wsi,
                 isComplete = IsEventComplete(((State *)user)->event); 
                 if (isComplete)
                 {
-                    printf("NOT null anymore %s\n", ((State *)user)->event);
+                    LogInfo("NOT null anymore %s\n", ((State *)user)->event);
                     LoadBufferAndApplyEvent(marketEvent, (State *)user, buf);
                     memset(state->event, 0, sizeof(state->event));
                 }
@@ -853,13 +1137,13 @@ LoadTradeEvent(Trade_event *trade, char *input, State *state)
     {
         state->sellPressure += trade->quantity;
         state->sellPressureParent += trade->quantity;
-        printf("Sell pressure added to %f\n", state->sellPressure);
+        LogInfo("Sell pressure added to %f\n", state->sellPressure);
     }
     else
     {
         state->buyPressure += trade->quantity;
         state->buyPressureParent += trade->quantity;
-        printf("Buy pressure added to %f\n", state->buyPressure);
+        LogInfo("Buy pressure added to %f\n", state->buyPressure);
     }
     yyjson_doc_free(doc);
 }
@@ -873,15 +1157,15 @@ CallbackBinanceTradeStream(struct lws *wsi,
     switch (reason)
     {
         case LWS_CALLBACK_CLIENT_ESTABLISHED:
-            printf("callback_binance: LWS_CALLBACK_CLIENT_ESTABLISHED\n");
+            LogInfo("callback_binance: LWS_CALLBACK_CLIENT_ESTABLISHED\n");
             break;
 
         case LWS_CALLBACK_CLOSED:
-            printf("LWS_CALLBACK_CLOSED\n");
+            LogInfo("LWS_CALLBACK_CLOSED\n");
             break;
 
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-            printf("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
+            LogInfo("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
             break;
 
         case LWS_CALLBACK_CLIENT_RECEIVE:
@@ -893,7 +1177,7 @@ CallbackBinanceTradeStream(struct lws *wsi,
                 memcpy(buf, in, len);
                 buf[len] = '\0';
                 // ((char *)in)[len] = '\0';
-                printf("rx Trade %d '%s'\n", (int)len, buf);
+                LogInfo("rx Trade %d '%s'\n", (int)len, buf);
                 Position position = state->position;
                 Trade_event tradeEvent = {};
                 bool isComplete = IsEventComplete(buf);
@@ -911,7 +1195,7 @@ CallbackBinanceTradeStream(struct lws *wsi,
                 isComplete = IsEventComplete(state->event); 
                 if (isComplete)
                 {
-                    printf("NOT null anymore %s\n", state->event);
+                    LogInfo("NOT null anymore %s\n", state->event);
                     LoadTradeEvent(&tradeEvent, buf, state);
                     BufferTradeEvent(tradeEvent, &state->TradeEventsBuffer);
                     memset(state->event, 0, sizeof(state->event));
@@ -923,10 +1207,10 @@ CallbackBinanceTradeStream(struct lws *wsi,
                     TradeEventsBuffer.
                     buffer[MAX_EVENTS - 1].price;
 
-                printf("last price is %f\n", lastPrice);
+                LogInfo("last price is %f\n", lastPrice);
                 if (!(state->isPriceTaken) || state->startPrice == 0.0)
                 {
-                    printf("setting the start price\n");
+                    LogInfo("setting the start price\n");
                     state->startPrice = lastPrice;
                     state->startPriceParent = lastPrice;
                     state->isPriceTaken = true;
@@ -946,8 +1230,8 @@ CallbackBinanceTradeStream(struct lws *wsi,
                         state->lastTimeParent,
                         endTime
                     );
-                    printf("refresh Times are %f - %f\n", state->timeToRefresh, state->timeToRefreshParent);
-                    printf("Times are %f - %f\n", timeElapsedMS, timeElapsedMSParent);
+                    LogInfo("refresh Times are %f - %f\n", state->timeToRefresh, state->timeToRefreshParent);
+                    LogInfo("Times are %f - %f\n", timeElapsedMS, timeElapsedMSParent);
 
                     if (timeElapsedMS > ((State *)user)->timeToRefresh)
                     {
@@ -959,18 +1243,18 @@ CallbackBinanceTradeStream(struct lws *wsi,
 
                     if (timeElapsedMSParent > state->timeToRefreshParent)
                     {
-                        printf("Refreshing Parent\n");
+                        LogInfo("Refreshing Parent\n");
                         state->startPriceParent   = lastPrice;
                         state->lastTimeParent     = endTime;
                         state->buyPressureParent  = 0.0;
                         state->sellPressureParent = 0.0;
                     }
 
-                    printf("start price is %f\n", state->startPrice);
+                    LogInfo("start price is %f\n", state->startPrice);
 
                     if (abs((lastPrice - state->startPrice)) < 1.5)
                     {
-                        printf("Guilty! There is no price movement\n");
+                        LogInfo("Guilty! There is no price movement\n");
                     }
                     else
                     {
@@ -979,17 +1263,17 @@ CallbackBinanceTradeStream(struct lws *wsi,
                         {
                             if (buyPressure < 1.1 * sellPressure)
                             {
-                                printf("Guilty! Not enough pressure on buy side\n");
+                                LogInfo("Guilty! Not enough pressure on buy side\n");
                             }
                             else if (timeElapsedMS < 4 * 55 * 60 * 1000)
                             {
-                                printf("Guilty! Too fast, need real slow and steady!\n");
+                                LogInfo("Guilty! Too fast, need real slow and steady!\n");
                             }
                             else if (lastPrice <= state->startPriceParent ||
                                 state->buyPressureParent < state->sellPressureParent)
                             {
-                                printf("Guilty! Parent has done work in the opposite/choppy direction\n");
-                                printf("%f-%f, %f-%f\n", lastPrice, state->startPriceParent,
+                                LogInfo("Guilty! Parent has done work in the opposite/choppy direction\n");
+                                LogInfo("%f-%f, %f-%f\n", lastPrice, state->startPriceParent,
                                         state->buyPressureParent,
                                         state->sellPressureParent);
                             }
@@ -1003,17 +1287,17 @@ CallbackBinanceTradeStream(struct lws *wsi,
                         {
                             if (sellPressure < 1.1 * buyPressure)
                             {
-                                printf("Guilty! Not enough pressure on sell side\n");
+                                LogInfo("Guilty! Not enough pressure on sell side\n");
                             }
                             else if (timeElapsedMS < 4 * 55 * 60 * 1000)
                             {
-                                printf("Guilty! Too fast, need real slow and steady!\n");
+                                LogInfo("Guilty! Too fast, need real slow and steady!\n");
                             }
                             else if (lastPrice >= state->startPriceParent ||
                                 state->buyPressureParent > state->sellPressureParent)
                             {
-                                printf( "Guilty! Parent has done work in the opposite/choppy direction\n");
-                                printf("%f-%f, %f-%f\n", lastPrice,
+                                LogInfo( "Guilty! Parent has done work in the opposite/choppy direction\n");
+                                LogInfo("%f-%f, %f-%f\n", lastPrice,
                                                          state->startPriceParent,
                                                          state->buyPressureParent,
                                                          state->sellPressureParent);
@@ -1038,22 +1322,22 @@ CallbackBinanceTradeStream(struct lws *wsi,
                         endTime
                     );
                     Posn_type posnType = ((State *)user)->posnType;
-                    printf("position is open, remaining time %f\n",
+                    LogInfo("position is open, remaining time %f\n",
                            ((State *)user)->timeToClose - timeElapsedMS);
 
                     if(timeElapsedMS < state->timeToClose &&
                         ((posnType == LONG && ((lastPrice - state->startPrice) * position.qty) > -0.35) ||
                         (posnType == SHORT && ((lastPrice - state->startPrice) * position.qty) > -0.35))) 
                     {
-                        printf("Guilty! No need to close, time not out and loss in check\n");
+                        LogInfo("Guilty! No need to close, time not out and loss in check\n");
                     }
                     else if(posnType == LONG &&
                             (buyPressure > 2 * sellPressure && 
                             ((state->startPrice - lastPrice) > 0.5)) &&
                             (state->timeToClose * 2 < MAX_TIME_PERIOD)) 
                     {
-                        printf("Guilty! No need to close, long pressure not reversed, so Load up!\n");
-                        printf("Loading the position at lastPrice %f\n", lastPrice);
+                        LogInfo("Guilty! No need to close, long pressure not reversed, so Load up!\n");
+                        LogInfo("Loading the position at lastPrice %f\n", lastPrice);
                         state->shouldPlaceOrder = true;
                         state->orderType = LOADBUY;
                     }
@@ -1062,14 +1346,14 @@ CallbackBinanceTradeStream(struct lws *wsi,
                             ((state->startPrice - lastPrice) > 0.5)) &&
                             (state->timeToClose * 2 < MAX_TIME_PERIOD)) 
                     {
-                        printf("Guilty! No need to close, short pressure not reversed, so Load up!\n");
-                        printf("Loading the position at lastPrice %f\n", lastPrice);
+                        LogInfo("Guilty! No need to close, short pressure not reversed, so Load up!\n");
+                        LogInfo("Loading the position at lastPrice %f\n", lastPrice);
                         state->shouldPlaceOrder = true;
                         state->orderType = LOADSELL;
                     }
                     else // will only close now when the pressure's have reversed.
                     {
-                        printf("closing the position at lastPrice %f\n", lastPrice);
+                        LogInfo("closing the position at lastPrice %f\n", lastPrice);
                         if (posnType == LONG)
                         {
                             state->shouldPlaceOrder = true;
@@ -1130,7 +1414,7 @@ write_data(void *buffer, size_t size, size_t nmemb, void *userp)
     snapshot->size = realsize;
     snapshot->resp[snapshot->size] = 0;
 
-    printf("in write call back, size is %zu, resp is %s\n", realsize, snapshot->resp);
+    LogInfo("in write call back, size is %zu, resp is %s\n", realsize, snapshot->resp);
     return realsize;
 }
 
@@ -1146,7 +1430,7 @@ SetOrderBook(State *state)
     yyjson_val *root = yyjson_doc_get_root(doc);
     yyjson_val *id = yyjson_obj_get(root, "lastUpdateId");
     uint64 lastUpdateId = (uint64)yyjson_get_int(id);
-    printf("Last update id is %lu\n", lastUpdateId);
+    LogInfo("Last update id is %lu\n", lastUpdateId);
     OrderBook->lastUpdateId = lastUpdateId;
 
     yyjson_val *bids = yyjson_obj_get(root, "bids");
@@ -1159,28 +1443,28 @@ void
 PrintOrderBook(State *state)
 {
     Order_book *OrderBook = &state->OrderBook;
-    printf("BIDS===================\n");
+    LogInfo("BIDS===================\n");
     quote *bids = OrderBook->bids;
     quote *asks = OrderBook->asks;
     for (int i = 0; i < MAX_LEVELS; i++)
     {
-        printf("Price: %f, quantity: %f\n", bids[i].price, bids[i].quantity);
+        LogInfo("Price: %f, quantity: %f\n", bids[i].price, bids[i].quantity);
     }
 
-    printf("ASKS===================\n");
+    LogInfo("ASKS===================\n");
     for (int i = 0; i < MAX_LEVELS; i++)
     {
-        printf("Price: %f, quantity: %f\n", asks[i].price, asks[i].quantity);
+        LogInfo("Price: %f, quantity: %f\n", asks[i].price, asks[i].quantity);
     }
 }
 
 void
 PrintTradeState(State *state)
 {
-    printf("FORCES===================\n");
-    printf("START PRICE %f\n", state->startPrice); 
-    printf("SELL PRESSURE %f\n", state->sellPressure); 
-    printf("BUY PRESSURE %f\n", state->buyPressure); 
+    LogInfo("FORCES===================\n");
+    LogInfo("START PRICE %f\n", state->startPrice); 
+    LogInfo("SELL PRESSURE %f\n", state->sellPressure); 
+    LogInfo("BUY PRESSURE %f\n", state->buyPressure); 
 }
 
 void
@@ -1197,16 +1481,16 @@ IgnoreAndApplyEvents(State *state)
         Market_event event = MarketEventsBuffer->buffer[i];
         uint64 firstId = event.U; 
         uint64 lastId = event.u; 
-        printf("Compare: lastId %lu , firstId %lu, and lastUpdateId %lu\n",
+        LogInfo("Compare: lastId %lu , firstId %lu, and lastUpdateId %lu\n",
                lastId, firstId, lastUpdateId);
         if (lastId <= lastUpdateId)
         {
-            printf("Continuing\n");
+            LogInfo("Continuing\n");
             continue; // Ignore.
         }
         else if ((firstId - lastUpdateId) == 1)
         {
-            printf("Applying the event\n");
+            LogInfo("Applying the event\n");
             ApplyEvent(event, OrderBook);
             lastUpdateId = lastId;
             applied = true;
@@ -1216,7 +1500,7 @@ IgnoreAndApplyEvents(State *state)
         else
         {
             // Missed some events, rework the entire snapshot.
-            printf("Rework the snapshot\n");
+            LogInfo("Rework the snapshot\n");
         }
     }
 
@@ -1250,7 +1534,7 @@ generateUUID(char *uuidStr)
     // Convert the binary UUID into its standard string representation
     uuid_unparse(binuuid, uuidStr);
 
-    printf("Generated UUID: %s\n", uuidStr);
+    LogInfo("Generated UUID: %s\n", uuidStr);
 }
 
 int
@@ -1274,11 +1558,12 @@ sendOrder(Order *order, Channel *tradeChannel)
     yyjson_mut_obj_add_str(doc, root, "method", "order.place");
     yyjson_mut_val *params = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_str(doc, params, "apiKey", getenv("API_KEY_SUB"));
+    yyjson_mut_obj_add_str(doc, params, "newClientOrderId", order->id);
     yyjson_mut_obj_add_str(doc, params, "price", priceStr);
     // yyjson_mut_obj_add_float(doc, params, "price", order->price);
     yyjson_mut_obj_add_str(doc, params, "quantity", qtyStr);
     // char qtyStr[32]; /* to match teh %.2f in body formatting below */
-    // snprintf(qtyStr, sizeof(qtyStr), "%.2f", order->qty);
+    // LogInfo(qtyStr, sizeof(qtyStr), "%.2f", order->qty);
     // yyjson_mut_obj_add_val(doc, params, "quantity", yyjson_mut_raw(doc, qtyStr)); 
     yyjson_mut_obj_add_str(doc, params, "side", OrderSideString[order->side]);
     /* NOTE(AKHIL): for the signature to pass, the params should be sorted
@@ -1288,8 +1573,9 @@ sendOrder(Order *order, Channel *tradeChannel)
     char body[1024];
     snprintf(body,
              sizeof(body),
-             "apiKey=%s&price=%s&quantity=%s&side=%s&symbol=%s&timeInForce=%s&timestamp=%lu&type=%s",
+             "apiKey=%s&newClientOrderId=%s&price=%s&quantity=%s&side=%s&symbol=%s&timeInForce=%s&timestamp=%lu&type=%s",
              getenv("API_KEY_SUB"),
+             order->id,
              priceStr,
              qtyStr,
              OrderSideString[order->side],
@@ -1297,7 +1583,7 @@ sendOrder(Order *order, Channel *tradeChannel)
              "GTC",
              timestamp,
              OrderTypeString[order->type]); 
-    printf("body is %s\n", body);
+    LogInfo("body is %s\n", body);
     char signature[2048];
     generate_signature(body, getenv("API_SECRET_SUB"), signature);
     yyjson_mut_obj_add_str(doc, params, "signature", signature);
@@ -1307,8 +1593,8 @@ sendOrder(Order *order, Channel *tradeChannel)
     yyjson_mut_obj_add_str(doc, params, "type", OrderTypeString[order->type]);
     yyjson_mut_obj_add_val(doc, root, "params", params);
     char *json = yyjson_mut_write(doc, 0, NULL);
-    printf("json is %s\n", json);
-    printf("WRITING==============\n");
+    LogInfo("json is %s\n", json);
+    LogInfo("WRITING==============\n");
     // char buf[LWS_PRE + StringLength(json)];
     // memcpy(&buf[LWS_PRE], json, StringLength(json));
     // lws_write(lwsTrade, (unsigned char *)&buf[LWS_PRE], StringLength(json), LWS_WRITE_TEXT);
@@ -1342,7 +1628,7 @@ cancelOrder(Order *order, Channel *tradeChannel)
              order->id,
              order->coin,
              timestamp);
-    printf("body is %s\n", body);
+    LogInfo("body is %s\n", body);
     char signature[2048];
     generate_signature(body, getenv("API_SECRET_SUB"), signature);
     yyjson_mut_obj_add_str(doc, params, "signature", signature);
@@ -1350,8 +1636,8 @@ cancelOrder(Order *order, Channel *tradeChannel)
     yyjson_mut_obj_add_int(doc, params, "timestamp", timestamp);
     yyjson_mut_obj_add_val(doc, root, "params", params);
     char *json = yyjson_mut_write(doc, 0, NULL);
-    printf("json is %s\n", json);
-    printf("WRITING CANCEL==============\n");
+    LogInfo("json is %s\n", json);
+    LogInfo("WRITING CANCEL==============\n");
     // char bufCancel[LWS_PRE + StringLength(json)];
     // memcpy(&bufCancel[LWS_PRE], json, StringLength(json));
     // lws_write(lwsTrade, (unsigned char *)&bufCancel[LWS_PRE], StringLength(json), LWS_WRITE_TEXT);
@@ -1388,7 +1674,7 @@ tradeThread(void *arg)
         {
             char *message =
                 (char *)ChannelTake(args->channel);
-            printf("Taken message is %s\n", message);
+            // LogInfo("Taken message is %s\n", message);
 
             if (message != NULL)
             {
@@ -1424,14 +1710,111 @@ tradeThread(void *arg)
     return NULL;
 }
 
+void
+DashboardRender(
+    Position *position,
+    Order *orders,
+    int orderCount
+)
+{
+    /*
+     * Clear terminal and move cursor to top.
+     */
+    printf("\033[2J\033[H");
+
+    printf("============================================================\n");
+    printf("                       TRADING BOT                          \n");
+    printf("============================================================\n");
+
+    /*
+     * Position
+     */
+    printf("\nPOSITION\n");
+    printf("------------------------------------------------------------\n");
+
+    if (position == NULL || position->qty == 0)
+    {
+        printf("No open position\n");
+    }
+    else
+    {
+        printf("Symbol       : %s\n", position->symbol);
+        printf("Quantity     : %.4f\n", position->qty);
+        printf("Entry Price  : %.4f\n", position->price);
+        printf("LTP          : %.4f\n", position->ltp);
+        printf("PnL          : %.4f\n", position->pnl);
+    }
+
+    /*
+     * Active orders
+     */
+    printf("\nACTIVE ORDERS\n");
+    printf("------------------------------------------------------------\n");
+
+    printf(
+        "%-20s %-8s %-10s %-10s %-12s %-10s\n",
+        "ID",
+        "SIDE",
+        "QTY",
+        "PRICE",
+        "TYPE",
+        "STATUS"
+    );
+
+    for (int i = 0; i < orderCount; i++)
+    {
+        Order *order = &orders[i];
+
+        if (order->status == CANCELLED)
+            continue;
+
+        printf(
+            "%-20.20s %-8s %-10.4f %-10.4f %-12s %-10s\n",
+            order->id,
+            SideString(order->side),
+            order->qty,
+            order->price,
+            OrderTypeString[order->type],
+            OrderStatusString(order->status)
+        );
+    }
+
+    /*
+     * Current time
+     */
+    printf("\n------------------------------------------------------------\n");
+    printf("Updated: ");
+
+    time_t now = time(NULL);
+    struct tm tm_now;
+
+    localtime_r(&now, &tm_now);
+
+    char buf[32];
+
+    strftime(
+        buf,
+        sizeof(buf),
+        "%Y-%m-%d %H:%M:%S",
+        &tm_now
+    );
+
+    printf("%s\n", buf);
+
+    printf("============================================================\n");
+
+    fflush(stdout);
+}
+
 int
 main()
 {
+    LogInit(LOG_ERROR);
     Channel tradeChannel;
     ChannelInit(&tradeChannel);
     CURLcode res = curl_global_init(CURL_GLOBAL_ALL);
     if (res != CURLE_OK) {
-        printf("curl setup failed, abort!");
+        LogInfo("curl setup failed, abort!");
         return -1;
     }
 
@@ -1443,7 +1826,7 @@ main()
     setbuf(outputFile, NULL); // Disables buffering completely
     if (outputFile == NULL)
     {
-        printf("Couldn't open file\n");
+        LogInfo("Couldn't open file\n");
         return -1;
     }
 
@@ -1478,11 +1861,11 @@ main()
     state.SL = 4;
     // | LLL_DEBUG
     // lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO, NULL); 
-    printf("running\n");
+    LogInfo("running\n");
     char address[1024];
     StringCpy(address, (char *)MARKET_BASE_ENDP);
     StringCat(address, (char *)STREAM_PATH);
-    printf("address is %s\n", address);
+    LogInfo("address is %s\n", address);
     struct lws_context_creation_info info = {};
     info.port = CONTEXT_PORT_NO_LISTEN;
     info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT; // Crucial for SSL
@@ -1494,7 +1877,7 @@ main()
     struct lws_context *context = lws_create_context(&info);
     if (context == NULL)
     {
-        printf("Couldn't create context\n");
+        LogInfo("Couldn't create context\n");
         return -1;
     }
     /* connect the websocket to binance orderbook */
@@ -1514,7 +1897,7 @@ main()
     struct lws *lws = lws_client_connect_via_info(&ccinfo);
     if (lws == NULL)
     {
-        printf("Connection failed\n");
+        LogInfo("Connection failed\n");
         return -1;
     }
 
@@ -1531,12 +1914,13 @@ main()
     ccinfoTrade.ietf_version_or_minus_one = -1;
     ccinfoTrade.protocol = "binance-trade";
     struct per_session_data__minimal pss = {}; 
+    pss.state = &state;
     pss.buffer = NULL;
     ccinfoTrade.userdata = (void *)&pss;
     struct lws *lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
     if (lwsTrade == NULL)
     {
-        printf("Connection failed\n");
+        LogInfo("Connection failed\n");
         return -1;
     }
     uint16 loopcount = 0;
@@ -1560,28 +1944,28 @@ main()
     {
         if (state.MarketEventsBuffer.currentWriteIndex > 0 &&
             !state.isSnapshot) {
-            printf("Checking for snapshot...\n");
+            LogInfo("Checking for snapshot...\n");
             curl_easy_setopt(curl, CURLOPT_URL, SNAPSHOT_URL);
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&state.snapshot);
             CURLcode result = curl_easy_perform(curl);
             if (result != CURLE_OK) {
-                printf("curl call failed!, %s abort!\n", curl_easy_strerror(result));
+                LogInfo("curl call failed!, %s abort!\n", curl_easy_strerror(result));
             }
             char *input = (char *)state.snapshot.resp;
             yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
             yyjson_val *root = yyjson_doc_get_root(doc);
             yyjson_val *id = yyjson_obj_get(root, "lastUpdateId");
             uint64 lastUpdateId = (uint64)yyjson_get_int(id);
-            printf("Last update id is %lu\n", lastUpdateId);
+            LogInfo("Last update id is %lu\n", lastUpdateId);
             Market_event firstEvent = state.MarketEventsBuffer.buffer[0];
-            printf("first update id is %lu\n", firstEvent.U);
-            printf("Compare: lastUpdateId %lu with first event id %lu\n",
+            LogInfo("first update id is %lu\n", firstEvent.U);
+            LogInfo("Compare: lastUpdateId %lu with first event id %lu\n",
                    lastUpdateId, firstEvent.U);
-            printf("current Write inDex is %u\n",
+            LogInfo("current Write inDex is %u\n",
                    state.MarketEventsBuffer.currentWriteIndex);
             if (lastUpdateId > firstEvent.U) {
-                printf("LastUpdateId %lu > the first buffered event id!", lastUpdateId);
+                LogInfo("LastUpdateId %lu > the first buffered event id!", lastUpdateId);
                 state.isSnapshot = true;
             }
         }
@@ -1589,7 +1973,7 @@ main()
                  !state.AreEventsApplied)
         {
             SetOrderBook(&state);
-            printf("Order book id is %lu\n", state.OrderBook.lastUpdateId);
+            LogInfo("Order book id is %lu\n", state.OrderBook.lastUpdateId);
             // discard/ignore the buffered events where the id < snapshot id
             // apply the buffered events to the order book
             IgnoreAndApplyEvents(&state);
@@ -1613,6 +1997,20 @@ main()
         
         timespec endTime;
         clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
+        real64 timeElapsedMS = XtimeElapsedMS(
+            state.lastTimeDashboard,
+            endTime
+        );
+        if (timeElapsedMS > 250)
+        {
+            state.lastTimeDashboard = endTime;
+            DashboardRender(
+                &state.position,
+                state.orders,
+                state.currOrderIndex + 1
+            );
+        }
+
         if (state.position.qty == 0)
         {
             /* check if refresh and
@@ -1621,15 +2019,17 @@ main()
                 state.lastTime,
                 endTime
             );
-            printf("time elapsed is %f\n", timeElapsedMS);
+            // LogInfo("time elapsed is %f\n", timeElapsedMS);
             if (timeElapsedMS > MIN_REFRESH_TIME)
             {
                 state.lastTime = endTime;
-                printf("TIME ELAPSED=====\n");
+                LogInfo("TIME ELAPSED=====\n");
                 cancelAllOrders(&state, &tradeChannel);
                 // createNewPair(state.orders);
                 Order buyOrder = {};
                 Order sellOrder = {};
+                buyOrder.timestamp = XgetTimestamp();
+                sellOrder.timestamp = XgetTimestamp();
                 buyOrder.coin = (char *)"SOLUSDT";
                 buyOrder.side = BUY;
                 buyOrder.type = LIMIT;
@@ -1650,7 +2050,7 @@ main()
         }
         else
         {
-            printf("CHECKING SL======\n");
+            LogInfo("CHECKING SL======\n");
             /* update the position's pnl and if >= sl, cancel 
                the other order */
             quote bestQ = getBestQuote(&state.OrderBook);
@@ -1659,16 +2059,17 @@ main()
             state.position.pnl = (ltp - state.position.price) * state.position.qty;
             if (state.position.pnl < 0 && abs(state.position.pnl) >= state.SL)
             {
-                printf("SL HIT ======\n");
+                LogInfo("SL HIT ======\n");
                 /* close the position and cancel all orders */
                 Order closeOrder = {};
+                closeOrder.timestamp = XgetTimestamp();
                 closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
                 closeOrder.type = MARKET;
                 closeOrder.qty = state.position.qty;
                 closeOrder.status = PENDING;
                 strcpy(closeOrder.coin, state.position.symbol);
                 int res = sendOrder(&closeOrder, &tradeChannel);
-                if (res < 0) printf("couldn't close order \n");
+                if (res < 0) LogInfo("couldn't close order \n");
                 cancelAllOrders(&state, &tradeChannel);
             }
         }
@@ -1676,7 +2077,7 @@ main()
         // apply the event to the order book in the callback, if the OB is ready.
         // lws_service(context, 0);
 
-        PrintOrderBook(&state);
+        // PrintOrderBook(&state);
         // PrintTradeState(&state);
         loopcount++;
     }
@@ -1687,7 +2088,7 @@ main()
 }
 
 // if ((time(NULL) - state.lastTradeTime > 10)) {
-        //     printf("No data — reconnecting\n");
+        //     LogInfo("No data — reconnecting\n");
         //     fflush(stdout);
         //
         //     lws_context_destroy(context);
@@ -1696,7 +2097,7 @@ main()
         //     lwsTrade = lws_client_connect_via_info(&ccinfoTrade); 
         //     if (lwsTrade == NULL)
         //     {
-        //         printf("Connection failed\n");
+        //         LogInfo("Connection failed\n");
         //         return -1;
         //     }
         //
@@ -1719,17 +2120,17 @@ main()
         //     char time_str[32];
         //     if (state.orderType == OPENBUY)
         //     {
-        //         printf("opening the position after %f at lastPrice %f\n",
+        //         LogInfo("opening the position after %f at lastPrice %f\n",
         //                timeElapsedMS,
         //                lastPrice);
         //         // make the order call.
-        //         sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+        //         sLogInfo(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
         //                 "SOLUSDT",
         //                 "BUY",
         //                 "MARKET",
         //                 0.1,
         //                 timestamp);
-        //         printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+        //         LogInfo("body is %s, api key is %s\n", body, getenv("API_KEY"));
         //         bool res = BinanceMakeOrder(body);
         //         if (res)
         //         {
@@ -1745,7 +2146,7 @@ main()
         //             wallet.coin += trade.qtyAfterFee;
         //             wallet.usdt -= qty * lastPrice;
         //             formatMSTimestamp(timestamp, time_str, sizeof(time_str));
-        //             sprintf(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
+        //             sLogInfo(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
         //                     timestamp,
         //                     time_str,
         //                     "SOLUSDT",
@@ -1767,17 +2168,17 @@ main()
         //     }
         //     else if (state.orderType == OPENSELL)
         //     {
-        //         printf("opening the position after %f at lastPrice %f\n",
+        //         LogInfo("opening the position after %f at lastPrice %f\n",
         //                timeElapsedMS,
         //                lastPrice);
         //         // make the order call.
-        //         sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+        //         sLogInfo(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
         //                 "SOLUSDT",
         //                 "SELL",
         //                 "MARKET",
         //                 0.1,
         //                 timestamp);
-        //         printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+        //         LogInfo("body is %s, api key is %s\n", body, getenv("API_KEY"));
         //         bool res = BinanceMakeOrder(body);
         //         if (res)
         //         {
@@ -1794,7 +2195,7 @@ main()
         //             wallet.usdt -= trade.qtyAfterFee * lastPrice;
         //             formatMSTimestamp(timestamp, time_str, sizeof(time_str));
         //             // make the order call.
-        //             sprintf(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
+        //             sLogInfo(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
         //                     timestamp,
         //                     time_str,
         //                     "SOLUSDT",
@@ -1816,13 +2217,13 @@ main()
         //     }
         //     else if (state.orderType == LOADBUY)
         //     {
-        //         sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+        //         sLogInfo(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
         //                 "SOLUSDT",
         //                 "SELL",
         //                 "MARKET",
         //                 0.1,
         //                 timestamp);
-        //         printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+        //         LogInfo("body is %s, api key is %s\n", body, getenv("API_KEY"));
         //         if (BinanceMakeOrder(body))
         //         {
         //             Trade trade = {};
@@ -1838,7 +2239,7 @@ main()
         //             wallet.usdt -= qty * lastPrice;
         //             formatMSTimestamp(timestamp, time_str, sizeof(time_str));
         //
-        //             sprintf(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
+        //             sLogInfo(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
         //                     timestamp,
         //                     time_str,
         //                     "SOLUSDT",
@@ -1859,13 +2260,13 @@ main()
         //     }
         //     else if (state.orderType == LOADSELL)
         //     {
-        //         sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+        //         sLogInfo(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
         //                 "SOLUSDT",
         //                 "SELL",
         //                 "MARKET",
         //                 0.1,
         //                 timestamp);
-        //         printf("body is %s, api key is %s\n", body, getenv("API_KEY"));
+        //         LogInfo("body is %s, api key is %s\n", body, getenv("API_KEY"));
         //         if (BinanceMakeOrder(body))
         //         {
         //             Trade trade = {};
@@ -1882,7 +2283,7 @@ main()
         //             formatMSTimestamp(timestamp, time_str, sizeof(time_str));
         //
         //             // make the order call.
-        //             sprintf(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
+        //             sLogInfo(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
         //                     timestamp,
         //                     time_str,
         //                     "SOLUSDT",
@@ -1903,7 +2304,7 @@ main()
         //     }
         //     else if (state.orderType == CLOSELONG)
         //     {
-        //         sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+        //         sLogInfo(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
         //                 "SOLUSDT",
         //                 "SELL",
         //                 "MARKET",
@@ -1926,7 +2327,7 @@ main()
         //             wallet.usdt -= trade.qtyAfterFee * lastPrice; 
         //             formatMSTimestamp(timestamp, time_str, sizeof(time_str));
         //
-        //             sprintf(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
+        //             sLogInfo(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
         //                     timestamp,
         //                     time_str,
         //                     "SOLUSDT",
@@ -1948,7 +2349,7 @@ main()
         //     }
         //     else if (state.orderType == CLOSESHORT)
         //     {
-        //         sprintf(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
+        //         sLogInfo(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
         //                 "SOLUSDT",
         //                 "BUY",
         //                 "MARKET",
@@ -1971,7 +2372,7 @@ main()
         //             wallet.usdt -= qty * lastPrice;
         //             formatMSTimestamp(timestamp, time_str, sizeof(time_str));
         //
-        //             sprintf(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
+        //             sLogInfo(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
         //                     timestamp,
         //                     time_str,
         //                     "SOLUSDT",
@@ -2013,7 +2414,7 @@ main()
     // struct lws *lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
     // if (lwsTrade == NULL)
     // {
-    //     printf("Connection failed\n");
+    //     LogInfo("Connection failed\n");
     //     return -1;
     // }
 

@@ -8,6 +8,7 @@ g++ \
     -DPLAYER_DEBUG=1 \
     main.cpp \
     channel.c \
+    log.c \
     -lwebsockets \
     -lyyjson \
     -lcurl \
