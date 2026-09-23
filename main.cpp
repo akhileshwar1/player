@@ -9,6 +9,7 @@
 #include <malloc.h>
 #include <uuid/uuid.h>
 #include <time.h>
+#include <math.h>
 #include "channel.h"
 #include "log.h"
 
@@ -48,6 +49,7 @@ typedef struct
     real64 ltp;
     real64 qty;
     real64 pnl;
+    uint64 timestamp;
 } Position;
 
 typedef struct
@@ -201,6 +203,7 @@ struct per_session_data__minimal {
     size_t len;           // Total length of data remaining
     size_t ptr;           // Current read position in the buffer
     State *state;
+    Channel *channel;
 };
 
 typedef struct
@@ -384,6 +387,227 @@ BinanceOrderStatusString(Order_status status)
     }
 }
 
+void
+generateUUID(char *uuidStr)
+{
+    uuid_t binuuid;
+    // Length: 36 characters + 1 null terminator
+    char uuid_str[37]; 
+
+    // Generate random UUID (Version 4)
+    uuid_generate_random(binuuid);
+
+    // Convert the binary UUID into its standard string representation
+    uuid_unparse(binuuid, uuidStr);
+
+    LogInfo("Generated UUID: %s\n", uuidStr);
+}
+
+uint64
+BinanceTimestamp() {
+    timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    // Convert to milliseconds
+    return ((uint64)(ts.tv_sec) * 1000) + ((uint64)(ts.tv_nsec) / 1000000);
+}
+
+void generate_signature(const char* query, const char* secret, char* out_hex) {
+    unsigned char hash[32];
+    unsigned int len = 32;
+
+    HMAC(EVP_sha256(), secret, strlen(secret), 
+         (unsigned char*)query, strlen(query), hash, &len);
+
+    for (int i = 0; i < 32; i++) {
+        sprintf(out_hex + (i * 2), "%02x", hash[i]);
+    }
+}
+
+static void
+UpdateOrderFromUserData(
+    State *state,
+    yyjson_val *event
+)
+{
+    yyjson_val *clientOrderId =
+        yyjson_obj_get(event, "c");
+
+    yyjson_val *orderStatus =
+        yyjson_obj_get(event, "X");
+
+    yyjson_val *executionType =
+        yyjson_obj_get(event, "x");
+
+    if (!clientOrderId || !orderStatus)
+    {
+        LogError("executionReport missing c or X");
+        return;
+    }
+
+    const char *localOrderId =
+        yyjson_get_str(clientOrderId);
+
+    const char *binanceStatus =
+        yyjson_get_str(orderStatus);
+
+    const char *binanceExecution =
+        executionType
+            ? yyjson_get_str(executionType)
+            : NULL;
+
+    if (!localOrderId || !binanceStatus)
+    {
+        LogError("Invalid executionReport");
+        return;
+    }
+
+    for (int i = 0; i <= state->currOrderIndex; i++)
+    {
+        Order *order = &state->orders[i];
+
+        if (strcmp(order->id, localOrderId) != 0)
+            continue;
+
+        /*
+         * Binance order status -> local status
+         */
+        if (strcmp(binanceStatus, "NEW") == 0 ||
+            strcmp(binanceStatus, "PARTIALLY_FILLED") == 0)
+        {
+            order->status = PENDING;
+        }
+        else if (strcmp(binanceStatus, "FILLED") == 0)
+        {
+            LogInfo("order filled\n");
+            order->status = COMPLETED;
+
+            /*
+             * Use actual execution information from the
+             * user-data event, not the original order qty/price.
+             */
+            yyjson_val *executedQtyVal =
+                yyjson_obj_get(event, "l");
+
+            yyjson_val *executionPriceVal =
+                yyjson_obj_get(event, "L");
+
+            real64 executedQty =
+                executedQtyVal
+                    ? atof(yyjson_get_str(executedQtyVal))
+                    : 0.0;
+
+            real64 executionPrice =
+                executionPriceVal
+                    ? atof(yyjson_get_str(executionPriceVal))
+                    : 0.0;
+
+            LogInfo(
+                "FILLED %s qty=%.8f price=%.8f",
+                order->id,
+                executedQty,
+                executionPrice
+            );
+
+            /*
+             * Position update.
+             */
+            Assert(
+                state->position.symbol == NULL ||
+                strcmp(
+                    state->position.symbol,
+                    order->coin
+                ) == 0
+            );
+
+            real64 signedQty =
+                (order->side == SELL)
+                    ? -executedQty
+                    : executedQty;
+
+            real64 oldQty =
+                state->position.qty;
+
+            real64 oldPrice =
+                state->position.price;
+
+            real64 newQty =
+                oldQty + signedQty;
+
+            /*
+             * Opening / adding to a position.
+             */
+            if (oldQty == 0.0)
+            {
+                state->position.price = executionPrice;
+            }
+            else if (
+                (oldQty > 0.0 && signedQty > 0.0) ||
+                (oldQty < 0.0 && signedQty < 0.0)
+            )
+            {
+                /*
+                 * Adding to the same side:
+                 * weighted average entry price.
+                 */
+                state->position.price =
+                    (
+                        fabs(oldQty) * oldPrice +
+                        fabs(signedQty) * executionPrice
+                    )
+                    /
+                    fabs(newQty);
+            }
+            else if (newQty == 0.0)
+            {
+                /*
+                 * Fully closed.
+                 */
+                state->position.price = 0.0;
+            }
+
+            state->position.qty =
+                newQty;
+
+            state->position.ltp =
+                executionPrice;
+
+            state->position.timestamp =
+                order->timestamp;
+        }
+        else if (
+            strcmp(binanceStatus, "CANCELED") == 0 ||
+            strcmp(binanceStatus, "EXPIRED") == 0 ||
+            strcmp(binanceStatus, "REJECTED") == 0
+        )
+        {
+            order->status = CANCELLED;
+        }
+        else
+        {
+            LogWarn(
+                "Unknown Binance order status '%s' for %s",
+                binanceStatus,
+                localOrderId
+            );
+
+            return;
+        }
+
+        LogInfo(
+            "Order %s -> %s (execution=%s)",
+            order->id,
+            binanceStatus,
+            binanceExecution ? binanceExecution : ""
+        );
+
+        return;
+    }
+
+    LogWarn(
+        "Received executionReport for unknown order %s",
+        localOrderId
+    );
+}
 
 static void
 UpdateOrderFromBinance(
@@ -462,7 +686,19 @@ UpdateOrderFromBinance(
         }
         else if (strcmp(binanceStatus, "FILLED") == 0)
         {
+            printf("order filled\n");
             order->status = COMPLETED;
+            /* assumes that there orders are for one position */
+            Assert(0 == strcmp(state->position.symbol, order->coin))
+            real64 qty = (order->side == SELL) ? -order->qty : order->qty;
+            state->position.qty += qty;
+            state->position.price = ((state->position.qty * state->position.price) +
+                                    (qty * order->price)) / qty;
+            state->position.ltp = order->price;
+            state->position.timestamp = order->timestamp;
+            state->position.pnl = qty * order->price +
+                state->position.price *
+                state->position.qty;
         }
         else if (strcmp(binanceStatus, "CANCELED") == 0 ||
                  strcmp(binanceStatus, "EXPIRED") == 0 ||
@@ -504,6 +740,103 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
         (struct per_session_data__minimal *)user;
 
     switch (reason) {
+        case LWS_CALLBACK_CLIENT_ESTABLISHED:
+            {
+                printf("TRADE WS ESTABLISHED\n");
+
+                char uuidStr[37];
+                generateUUID(uuidStr);
+
+                uint64 timestamp = BinanceTimestamp();
+
+                /*
+     * Parameters to sign.
+     * Only these parameters are present in the request,
+     * so this is the canonical payload.
+     */
+                char body[512];
+
+                snprintf(
+                    body,
+                    sizeof(body),
+                    "apiKey=%s&timestamp=%lu",
+                    getenv("API_KEY_SUB"),
+                    timestamp
+                );
+
+                char signature[65];
+
+                generate_signature(
+                    body,
+                    getenv("API_SECRET_SUB"),
+                    signature
+                );
+
+                yyjson_mut_doc *doc =
+                    yyjson_mut_doc_new(NULL);
+
+                yyjson_mut_val *root =
+                    yyjson_mut_obj(doc);
+
+                yyjson_mut_doc_set_root(doc, root);
+
+                yyjson_mut_obj_add_str(
+                    doc,
+                    root,
+                    "id",
+                    uuidStr
+                );
+
+                yyjson_mut_obj_add_str(
+                    doc,
+                    root,
+                    "method",
+                    "userDataStream.subscribe.signature"
+                );
+
+                yyjson_mut_val *params =
+                    yyjson_mut_obj(doc);
+
+                yyjson_mut_obj_add_str(
+                    doc,
+                    params,
+                    "apiKey",
+                    getenv("API_KEY_SUB")
+                );
+
+                yyjson_mut_obj_add_str(
+                    doc,
+                    params,
+                    "signature",
+                    signature
+                );
+
+                yyjson_mut_obj_add_int(
+                    doc,
+                    params,
+                    "timestamp",
+                    timestamp
+                );
+
+                yyjson_mut_obj_add_val(
+                    doc,
+                    root,
+                    "params",
+                    params
+                );
+
+                char *json =
+                    yyjson_mut_write(doc, 0, NULL);
+
+                LogInfo("User data subscribe: %s", json);
+
+                ChannelPut(pss->channel, json);
+
+                // free(json);
+                yyjson_mut_doc_free(doc);
+
+                break;
+            }
 
         case LWS_CALLBACK_CLIENT_WRITEABLE:
             {
@@ -562,76 +895,66 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                     LogError("Couldn't parse Binance trade response");
                     break;
                 }
-
                 yyjson_val *root =
                     yyjson_doc_get_root(doc);
 
-                yyjson_val *status =
-                    yyjson_obj_get(root, "status");
-
-                if (!status)
-                {
-                    LogError("Binance response has no status");
-                    yyjson_doc_free(doc);
-                    break;
-                }
-
                 /*
-     * HTTP/WebSocket RPC status.
-     *
-     * Example:
+     * User Data Stream:
      *
      * {
-     *   "id": "...",
-     *   "status": 200,
-     *   "result": {
-     *       "orderId": 123,
-     *       "clientOrderId": "...",
-     *       "status": "CANCELED"
-     *   }
+     *     "subscriptionId": 0,
+     *     "event": {
+     *         "e": "executionReport",
+     *         ...
+     *     }
      * }
      */
+                yyjson_val *event =
+                    yyjson_obj_get(root, "event");
 
-                int responseStatus =
-                    (int)yyjson_get_int(status);
-
-                if (responseStatus != 200)
+                if (event)
                 {
-                    yyjson_val *error =
-                        yyjson_obj_get(root, "error");
+                    yyjson_val *eventType =
+                        yyjson_obj_get(event, "e");
 
-                    if (error)
+                    if (eventType &&
+                        strcmp(
+                            yyjson_get_str(eventType),
+                            "executionReport"
+                        ) == 0)
                     {
-                        yyjson_val *msg =
-                            yyjson_obj_get(error, "msg");
-
-                        if (msg)
-                        {
-                            LogError(
-                                "Binance order error: %s",
-                                yyjson_get_str(msg)
-                            );
-                        }
+                        UpdateOrderFromUserData(
+                            pss->state,
+                            event
+                        );
                     }
+               }
+               else
+            {
+                    /*
+         * Normal WebSocket API response:
+         *
+         * {
+         *     "id": "...",
+         *     "status": 200,
+         *     "result": {...}
+         * }
+         */
+                    yyjson_val *rpcStatus =
+                        yyjson_obj_get(root, "status");
 
-                    yyjson_doc_free(doc);
-                    break;
-                }
+                    yyjson_val *result =
+                        yyjson_obj_get(root, "result");
 
-                yyjson_val *result =
-                    yyjson_obj_get(root, "result");
-
-                if (!result)
-                {
-                    LogError("Binance response has no result");
-                    yyjson_doc_free(doc);
-                    break;
-                }
-
-                UpdateOrderFromBinance(
-                    pss->state,
-                    result
-                );
+                    if (rpcStatus && result &&
+                        yyjson_get_int(rpcStatus) == 200)
+                    {
+                        UpdateOrderFromBinance(
+                            pss->state,
+                            result
+                        );
+                    }
+                } 
 
                 yyjson_doc_free(doc);
 
@@ -965,25 +1288,7 @@ LoadBufferAndApplyEvent(Market_event marketEvent, State *state, char *input)
     }
 }
 
-uint64
-BinanceTimestamp() {
-    timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    // Convert to milliseconds
-    return ((uint64)(ts.tv_sec) * 1000) + ((uint64)(ts.tv_nsec) / 1000000);
-}
 
-void generate_signature(const char* query, const char* secret, char* out_hex) {
-    unsigned char hash[32];
-    unsigned int len = 32;
-
-    HMAC(EVP_sha256(), secret, strlen(secret), 
-         (unsigned char*)query, strlen(query), hash, &len);
-
-    for (int i = 0; i < 32; i++) {
-        sprintf(out_hex + (i * 2), "%02x", hash[i]);
-    }
-}
 
 size_t
 writeDataBinanceOrder(void *buffer, size_t size, size_t nmemb, void *userp)
@@ -1521,21 +1826,7 @@ getBestQuote(Order_book *orderBook)
     return orderBook->bids[0];
 }
 
-void
-generateUUID(char *uuidStr)
-{
-    uuid_t binuuid;
-    // Length: 36 characters + 1 null terminator
-    char uuid_str[37]; 
 
-    // Generate random UUID (Version 4)
-    uuid_generate_random(binuuid);
-
-    // Convert the binary UUID into its standard string representation
-    uuid_unparse(binuuid, uuidStr);
-
-    LogInfo("Generated UUID: %s\n", uuidStr);
-}
 
 int
 sendOrder(Order *order, Channel *tradeChannel)
@@ -1738,11 +2029,14 @@ DashboardRender(
     }
     else
     {
+        char timeStr[100];
+        formatMSTimestamp(position->timestamp, timeStr, sizeof(timeStr));
         printf("Symbol       : %s\n", position->symbol);
         printf("Quantity     : %.4f\n", position->qty);
         printf("Entry Price  : %.4f\n", position->price);
         printf("LTP          : %.4f\n", position->ltp);
         printf("PnL          : %.4f\n", position->pnl);
+        printf("Last updated:  %s\n", timeStr);
     }
 
     /*
@@ -1915,6 +2209,7 @@ main()
     ccinfoTrade.protocol = "binance-trade";
     struct per_session_data__minimal pss = {}; 
     pss.state = &state;
+    pss.channel = &tradeChannel;
     pss.buffer = NULL;
     ccinfoTrade.userdata = (void *)&pss;
     struct lws *lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
