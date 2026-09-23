@@ -20,15 +20,15 @@
 #define TRADE_PATH "/ws-api/v3"
 #define STREAM_PATH "/ws/solusdt@depth"
 #define TRADE_STREAM_PATH "/ws/solusdt@trade"
-#define MAX_LEVELS 10
-#define MAX_EVENTS 10 
+#define MAX_LEVELS 30
+#define MAX_EVENTS 100 
 #define MAX_TIME_PERIOD 5 * 60 * 60 * 1000 // 5 hours in milliseconds. 
 #define TRADE_FEE 0.1 / 100
-#define SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=SOLUSDT&limit=10"
+#define SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=SOLUSDT&limit=30"
 #define TRADE_URL "https://api.binance.com/api/v3/order?"
 #define MIN_REFRESH_TIME 5000 
 #define MAX_ORDERS 3 
-#define SPREAD_LEVEL 5 /* 5th level on asks and bids is the spread. */ 
+#define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */ 
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
@@ -164,7 +164,7 @@ typedef struct
 typedef struct timespec timespec;
 typedef struct
 {
-    char event[4096];
+    char event[4096 * 10];
     Market_events_buffer MarketEventsBuffer;
     Trade_events_buffer TradeEventsBuffer;
     Snapshot snapshot;
@@ -517,7 +517,7 @@ UpdateOrderFromUserData(
                     state->position.symbol,
                     order->coin
                 ) == 0
-            );
+            )
 
             real64 signedQty =
                 (order->side == SELL)
@@ -571,6 +571,8 @@ UpdateOrderFromUserData(
             state->position.ltp =
                 executionPrice;
 
+            /* realised pnl */
+            state->position.pnl = (signedQty * executionPrice) + (oldQty * oldPrice);
             state->position.timestamp =
                 order->timestamp;
         }
@@ -1083,6 +1085,13 @@ BufferEvent(Market_event marketEvent, Market_events_buffer *marketEventsBuffer)
     {
         marketEventsBuffer->currentWriteIndex = currentWriteIndex % size;
     }
+    LogInfo(
+        "MEB=%p buffer=%p size=%u write=%u",
+        (void *)marketEventsBuffer,
+        (void *)marketEventsBuffer->buffer,
+        marketEventsBuffer->size,
+        marketEventsBuffer->currentWriteIndex
+    );
     marketEventsBuffer->buffer[marketEventsBuffer->currentWriteIndex] = marketEvent;
     LogInfo("Buffered event U %lu at index %u\n",
            marketEvent.U,
@@ -2036,7 +2045,7 @@ DashboardRender(
         printf("Entry Price  : %.4f\n", position->price);
         printf("LTP          : %.4f\n", position->ltp);
         printf("PnL          : %.4f\n", position->pnl);
-        printf("Last updated:  %s\n", timeStr);
+        printf("Last updated :  %s\n", timeStr);
     }
 
     /*
@@ -2152,7 +2161,7 @@ main()
     clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
     state.lastTime = endTime;
     state.currOrderIndex = -1;
-    state.SL = 4;
+    state.SL = 0.04;
     // | LLL_DEBUG
     // lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO, NULL); 
     LogInfo("running\n");
