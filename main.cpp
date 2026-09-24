@@ -152,7 +152,7 @@ typedef enum
 typedef struct 
 {
     char id[100];
-    char *coin;
+    char coin[100];
     real64 price;
     real64 qty;
     Order_type type;
@@ -2334,13 +2334,13 @@ main()
                 Order sellOrder = {};
                 buyOrder.timestamp = XgetTimestamp();
                 sellOrder.timestamp = XgetTimestamp();
-                buyOrder.coin = (char *)"SOLUSDT";
+                strcpy(buyOrder.coin, "SOLUSDT");
                 buyOrder.side = BUY;
                 buyOrder.type = LIMIT;
                 buyOrder.qty = 0.1;
                 buyOrder.price = state.OrderBook.bids[SPREAD_LEVEL].price; 
                 buyOrder.status = PENDING; 
-                sellOrder.coin = (char *)"SOLUSDT";
+                strcpy(sellOrder.coin, "SOLUSDT");
                 sellOrder.side = SELL;
                 sellOrder.type = LIMIT;
                 sellOrder.qty = 0.1;
