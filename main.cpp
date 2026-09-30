@@ -27,8 +27,9 @@
 #define SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=SOLUSDT&limit=30"
 #define TRADE_URL "https://api.binance.com/api/v3/order?"
 #define MIN_REFRESH_TIME 5000 
-#define MAX_ORDERS 3 
+#define MAX_ORDERS 10 
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */ 
+#define SPREAD_PCT 0.3 /* spread . */ 
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
@@ -161,6 +162,18 @@ typedef struct
     uint64 timestamp;
 } Order;
 
+typedef struct
+{
+    real64 lock;
+    real64 free;
+} Balance;
+
+typedef struct
+{
+    Balance *usdtBalance;
+    Balance *coinBalance;
+} Balances;
+
 typedef struct timespec timespec;
 typedef struct
 {
@@ -180,6 +193,7 @@ typedef struct
     real64 sellPressureParent;
     real64 SL; /* stop loss in absolute value */
     timespec lastTime;
+    timespec lastTimeExitRefresh;
     timespec lastTimeDashboard;
     timespec lastTimeParent;
     bool isOpen;
@@ -195,6 +209,7 @@ typedef struct
     Order_type orderType;
     Order orders[MAX_ORDERS];
     int currOrderIndex;
+    Balances *balances;
 } State;
 
 // Define a structure to hold your per-session (per-connection) data
@@ -930,8 +945,84 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                             event
                         );
                     }
-               }
-               else
+                    else if (eventType &&
+                             strcmp(yyjson_get_str(eventType),
+                                    "outboundAccountPosition") == 0)
+                    {
+                        yyjson_val *balances =
+                            yyjson_obj_get(event, "B");
+
+                        if (balances && yyjson_is_arr(balances))
+                        {
+                            yyjson_val *balance;
+                            size_t max;
+                            size_t idx;
+
+                            yyjson_arr_foreach(balances, idx, max, balance)
+                            {
+                                yyjson_val *asset =
+                                    yyjson_obj_get(balance, "a");
+
+                                yyjson_val *free =
+                                    yyjson_obj_get(balance, "f");
+
+                                yyjson_val *locked =
+                                    yyjson_obj_get(balance, "l");
+
+                                if (!asset || !free || !locked)
+                                    continue;
+
+                                const char *assetName =
+                                    yyjson_get_str(asset);
+
+                                const char *freeStr =
+                                    yyjson_get_str(free);
+
+                                const char *lockedStr =
+                                    yyjson_get_str(locked);
+
+                                if (!assetName || !freeStr || !lockedStr)
+                                    continue;
+
+                                LogInfo(
+                                    "BALANCE %s free=%s locked=%s\n",
+                                    assetName,
+                                    freeStr,
+                                    lockedStr
+                                );
+
+                                if (strcmp(assetName, "SOL") == 0)
+                                {
+                                    pss->state->balances->coinBalance->free = strtod(freeStr, NULL);
+                                    pss->state->balances->coinBalance->lock = strtod(lockedStr, NULL);
+
+                                    LogInfo(
+                                        "SOL BALANCE: free=%f locked=%f total=%f\n",
+                                        pss->state->balances->coinBalance->free,
+                                        pss->state->balances->coinBalance->lock,
+                                        pss->state->balances->coinBalance->free +
+                                        pss->state->balances->coinBalance->lock
+                                    );
+                                }
+                                else if (strcmp(assetName, "USDT") == 0)
+                                {
+                                    pss->state->balances->usdtBalance->free = strtod(freeStr, NULL);
+                                    pss->state->balances->usdtBalance->lock = strtod(lockedStr, NULL);
+
+                                    LogInfo(
+                                        "USDT BALANCE: free=%f locked=%f total=%f\n",
+                                        pss->state->balances->usdtBalance->free,
+                                        pss->state->balances->usdtBalance->lock,
+                                        pss->state->balances->usdtBalance->free +
+                                        pss->state->balances->usdtBalance->lock
+                                    );
+                                }
+                            }
+                        }
+
+                    }
+                }
+                else
             {
                     /*
          * Normal WebSocket API response:
@@ -1938,6 +2029,9 @@ cancelOrder(Order *order, Channel *tradeChannel)
     char *json = yyjson_mut_write(doc, 0, NULL);
     LogInfo("json is %s\n", json);
     LogInfo("WRITING CANCEL==============\n");
+    /* NOTE(Akhil) : this is premature, should ideally happen with an ack */
+    // order->status = CANCELLED;
+
     // char bufCancel[LWS_PRE + StringLength(json)];
     // memcpy(&bufCancel[LWS_PRE], json, StringLength(json));
     // lws_write(lwsTrade, (unsigned char *)&bufCancel[LWS_PRE], StringLength(json), LWS_WRITE_TEXT);
@@ -1949,7 +2043,7 @@ cancelOrder(Order *order, Channel *tradeChannel)
 void
 cancelAllOrders(State *state, Channel *tradeChannel)
 {
-    for (int i = 0; i < MAX_ORDERS; i++)
+    for (int i = MAX_ORDERS - 1; i >= 0; i--)
     {
         if (0 != strcmp(state->orders[i].id, ""))
         {
@@ -2162,6 +2256,18 @@ main()
     state.lastTime = endTime;
     state.currOrderIndex = -1;
     state.SL = 0.04;
+
+    Balance usdtBalance = {};
+    usdtBalance.lock = 0;
+    usdtBalance.free = 0;
+    Balance coinBalance = {};
+    coinBalance.lock = 0;
+    coinBalance.free = 0;
+
+    Balances balances = {};
+    balances.usdtBalance = &usdtBalance;
+    balances.coinBalance = &coinBalance;
+    state.balances = &balances;
     // | LLL_DEBUG
     // lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO, NULL); 
     LogInfo("running\n");
@@ -2298,6 +2404,25 @@ main()
 
            The point of refresh is on a pair, we refresh the 
            pair to get it higher up the queue on the exchange */ 
+
+        /* thing is this, every order here has to go into the 
+           async queue, place or cancel, the question is the ack
+           may come at any time, and it may invalidate the order in 
+           the queue, so that is why you get unknown order sent, 
+           but can it be worse? what happens if we send an order, it
+           locks the balance, and then we send another order that 
+           does the same operation but the balance is no more, so it
+           gets rejected, so is that the main problem? or something 
+           else brother? there;s also this thing that my local state
+           isn't consistent with the binance state? so which is true?
+           it is binance? so what do I do on my local end? do I copy
+           the local state from the binance state and then do the operations
+           on local? but why event maintain the local state? why the copy?
+           the copy is just to remember the last update, we don't want to 
+           poll. so once this is done, my point is the decisions on that state
+           should be correct, no rejects? 
+           one of the biggest assumption here is that there is no other program
+           running on the account, so the binance state can be copied here*/
         
         timespec endTime;
         clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
@@ -2315,6 +2440,7 @@ main()
             );
         }
 
+        LogInfo("state position qty is %f\n", state.position.qty);
         if (state.position.qty == 0)
         {
             /* check if refresh and
@@ -2324,30 +2450,40 @@ main()
                 endTime
             );
             // LogInfo("time elapsed is %f\n", timeElapsedMS);
-            if (timeElapsedMS > MIN_REFRESH_TIME)
+            if (timeElapsedMS >= MIN_REFRESH_TIME)
             {
                 state.lastTime = endTime;
                 LogInfo("TIME ELAPSED=====\n");
                 cancelAllOrders(&state, &tradeChannel);
                 // createNewPair(state.orders);
+                real64 mid =
+                    (state.OrderBook.bids[0].price +
+                    state.OrderBook.asks[0].price) / 2.0; 
+                LogInfo("Mid is %f\n", mid);
                 Order buyOrder = {};
                 Order sellOrder = {};
+                buyOrder.price  = mid * (1 - (SPREAD_PCT / (2 * 100)));
+                sellOrder.price = mid * (1 + (SPREAD_PCT / (2 * 100)));
+                LogInfo("buy and sell price are %f , %f\n", buyOrder.price, sellOrder.price);
                 buyOrder.timestamp = XgetTimestamp();
                 sellOrder.timestamp = XgetTimestamp();
                 strcpy(buyOrder.coin, "SOLUSDT");
                 buyOrder.side = BUY;
                 buyOrder.type = LIMIT;
                 buyOrder.qty = 0.1;
-                buyOrder.price = state.OrderBook.bids[SPREAD_LEVEL].price; 
+                // buyOrder.price = state.OrderBook.bids[SPREAD_LEVEL].price; 
                 buyOrder.status = PENDING; 
                 strcpy(sellOrder.coin, "SOLUSDT");
                 sellOrder.side = SELL;
                 sellOrder.type = LIMIT;
                 sellOrder.qty = 0.1;
-                sellOrder.price = state.OrderBook.asks[SPREAD_LEVEL].price;
+                // sellOrder.price = state.OrderBook.asks[SPREAD_LEVEL].price;
                 sellOrder.status = PENDING; 
                 int res = sendOrder(&buyOrder, &tradeChannel);
                 res = sendOrder(&sellOrder, &tradeChannel);
+                /* NOTE(Akhil): this should always be after send order
+                 *              if its not a pointer, since send generates
+                 *              the uuid */
                 state.orders[++state.currOrderIndex] = buyOrder;
                 state.orders[++state.currOrderIndex] = sellOrder;
             }
@@ -2361,20 +2497,50 @@ main()
             real64 ltp = bestQ.price;
             state.position.ltp = ltp;
             state.position.pnl = (ltp - state.position.price) * state.position.qty;
-            if (state.position.pnl < 0 && abs(state.position.pnl) >= state.SL)
+            real64 timeElapsedMS = XtimeElapsedMS(
+                state.lastTimeExitRefresh,
+                endTime
+            );
+            LogInfo("time elapsed is %f=====\n", timeElapsedMS);
+            if (state.position.pnl < 0 && fabs(state.position.pnl) >= state.SL)
             {
                 LogInfo("SL HIT ======\n");
                 /* close the position and cancel all orders */
+                cancelAllOrders(&state, &tradeChannel);
                 Order closeOrder = {};
                 closeOrder.timestamp = XgetTimestamp();
                 closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
                 closeOrder.type = MARKET;
-                closeOrder.qty = state.position.qty;
+                closeOrder.qty = fabs(state.balances->coinBalance->free);
                 closeOrder.status = PENDING;
                 strcpy(closeOrder.coin, state.position.symbol);
                 int res = sendOrder(&closeOrder, &tradeChannel);
                 if (res < 0) LogInfo("couldn't close order \n");
+                state.orders[++state.currOrderIndex] = closeOrder;
+            }
+            else if (timeElapsedMS >= MIN_REFRESH_TIME)
+            {
+                state.lastTimeExitRefresh = endTime;
+                LogInfo("TIME ELAPSED=====\n");
                 cancelAllOrders(&state, &tradeChannel);
+                /* refresh the close order */
+                real64 mid = state.position.price;
+                LogInfo("Mid is %f\n", mid);
+                real64 buyPrice  = mid * (1 - (SPREAD_PCT / (1 * 100)));
+                real64 sellPrice = mid * (1 + (SPREAD_PCT / (1 * 100)));
+                LogInfo("buy and sell price are %f , %f\n", buyPrice, sellPrice);
+                Order closeOrder = {};
+                closeOrder.timestamp = XgetTimestamp();
+                closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
+                closeOrder.type = LIMIT;
+                closeOrder.qty = fabs(state.balances->coinBalance->free);
+                closeOrder.price = (state.balances->coinBalance->free > 0) ?
+                    sellPrice : buyPrice;
+                closeOrder.status = PENDING;
+                strcpy(closeOrder.coin, state.position.symbol);
+                int res = sendOrder(&closeOrder, &tradeChannel);
+                if (res < 0) LogInfo("couldn't close order \n");
+                state.orders[++state.currOrderIndex] = closeOrder;
             }
         }
 
