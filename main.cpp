@@ -2517,7 +2517,10 @@ main()
                 closeOrder.timestamp = XgetTimestamp();
                 closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
                 closeOrder.type = MARKET;
-                closeOrder.qty = fabs(state.balances->coinBalance->free);
+                closeOrder.qty =
+                    (state.position.qty > 0) ?
+                    fabs(state.balances->coinBalance->free) : 0.1;
+
                 closeOrder.status = PENDING;
                 strcpy(closeOrder.coin, state.position.symbol);
                 int res = sendOrder(&closeOrder, &tradeChannel);
@@ -2539,7 +2542,9 @@ main()
                 closeOrder.timestamp = XgetTimestamp();
                 closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
                 closeOrder.type = LIMIT;
-                closeOrder.qty = fabs(state.balances->coinBalance->free);
+                closeOrder.qty =
+                    (state.position.qty > 0) ?
+                    fabs(state.balances->coinBalance->free) : 0.1;
                 closeOrder.price = (state.balances->coinBalance->free > 0) ?
                     sellPrice : buyPrice;
                 closeOrder.status = PENDING;
