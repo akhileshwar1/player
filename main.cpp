@@ -207,6 +207,10 @@ typedef struct
     time_t lastTradeTime;
     bool shouldPlaceOrder;
     Order_type orderType;
+    /* NOTE(Akhil): shouldn't these be pointers?
+     * will render the ordering of operations useless
+     * but then you have to worry if they are being freed 
+     * somewhere */
     Order orders[MAX_ORDERS];
     int currOrderIndex;
     Balances *balances;
@@ -2043,7 +2047,9 @@ cancelOrder(Order *order, Channel *tradeChannel)
 void
 cancelAllOrders(State *state, Channel *tradeChannel)
 {
-    for (int i = MAX_ORDERS - 1; i >= 0; i--)
+    /* using MAX_ORDERS here fucks up the currOrderIndex math here,
+     * leading to no cancellation of orders */
+    for (int i = state->currOrderIndex; i >= 0; i--)
     {
         if (0 != strcmp(state->orders[i].id, ""))
         {
