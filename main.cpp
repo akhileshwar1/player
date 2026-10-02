@@ -1960,7 +1960,6 @@ sendOrder(Order *order, Channel *tradeChannel)
     yyjson_mut_val *params = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_str(doc, params, "apiKey", getenv("API_KEY_SUB"));
     yyjson_mut_obj_add_str(doc, params, "newClientOrderId", order->id);
-    yyjson_mut_obj_add_str(doc, params, "price", priceStr);
     // yyjson_mut_obj_add_float(doc, params, "price", order->price);
     yyjson_mut_obj_add_str(doc, params, "quantity", qtyStr);
     // char qtyStr[32]; /* to match teh %.2f in body formatting below */
@@ -1972,18 +1971,36 @@ sendOrder(Order *order, Channel *tradeChannel)
      *              same in query string and params json to the decimal point */
     uint64 timestamp = BinanceTimestamp();
     char body[1024];
-    snprintf(body,
-             sizeof(body),
-             "apiKey=%s&newClientOrderId=%s&price=%s&quantity=%s&side=%s&symbol=%s&timeInForce=%s&timestamp=%lu&type=%s",
-             getenv("API_KEY_SUB"),
-             order->id,
-             priceStr,
-             qtyStr,
-             OrderSideString[order->side],
-             order->coin,
-             "GTC",
-             timestamp,
-             OrderTypeString[order->type]); 
+    if (order->type == MARKET)
+    {
+        snprintf(body,
+                 sizeof(body),
+                 "apiKey=%s&newClientOrderId=%s&quantity=%s&side=%s&symbol=%s&timeInForce=%s&timestamp=%lu&type=%s",
+                 getenv("API_KEY_SUB"),
+                 order->id,
+                 qtyStr,
+                 OrderSideString[order->side],
+                 order->coin,
+                 "GTC",
+                 timestamp,
+                 OrderTypeString[order->type]);
+    }
+    else
+    {
+        yyjson_mut_obj_add_str(doc, params, "price", priceStr);
+        snprintf(body,
+                 sizeof(body),
+                 "apiKey=%s&newClientOrderId=%s&price=%s&quantity=%s&side=%s&symbol=%s&timeInForce=%s&timestamp=%lu&type=%s",
+                 getenv("API_KEY_SUB"),
+                 order->id,
+                 priceStr,
+                 qtyStr,
+                 OrderSideString[order->side],
+                 order->coin,
+                 "GTC",
+                 timestamp,
+                 OrderTypeString[order->type]); 
+    }
     LogInfo("body is %s\n", body);
     char signature[2048];
     generate_signature(body, getenv("API_SECRET_SUB"), signature);
