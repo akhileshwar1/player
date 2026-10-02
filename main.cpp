@@ -2229,7 +2229,7 @@ DashboardRender(
 int
 main()
 {
-    LogInit(LOG_INFO);
+    LogInit(LOG_ERROR);
     Channel tradeChannel;
     ChannelInit(&tradeChannel);
     CURLcode res = curl_global_init(CURL_GLOBAL_ALL);
