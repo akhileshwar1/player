@@ -850,8 +850,13 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                     yyjson_mut_write(doc, 0, NULL);
 
                 LogInfo("User data subscribe: %s", json);
-
-                ChannelPut(pss->channel, json);
+                if (!ChannelPut(pss->channel, json))
+                {
+                    LogError("Trade channel full; dropping order message");
+                    free(json);
+                    yyjson_mut_doc_free(doc);
+                    return -1;
+                }
 
                 // free(json);
                 yyjson_mut_doc_free(doc);
@@ -1846,6 +1851,7 @@ SetOrderBook(State *state)
     yyjson_val *asks = yyjson_obj_get(root, "asks");
     AddLevelsToEvent(asks, OrderBook->asks);
     AddLevelsToEvent(bids, OrderBook->bids);
+    yyjson_doc_free(doc);
 }
 
 void
@@ -1993,7 +1999,13 @@ sendOrder(Order *order, Channel *tradeChannel)
     // char buf[LWS_PRE + StringLength(json)];
     // memcpy(&buf[LWS_PRE], json, StringLength(json));
     // lws_write(lwsTrade, (unsigned char *)&buf[LWS_PRE], StringLength(json), LWS_WRITE_TEXT);
-    ChannelPut(tradeChannel, json);
+    if (!ChannelPut(tradeChannel, json))
+    {
+        LogError("Trade channel full; dropping order message");
+        free(json);
+        yyjson_mut_doc_free(doc);
+        return -1;
+    }
     yyjson_mut_doc_free(doc);
     return 0;
 }
@@ -2039,7 +2051,13 @@ cancelOrder(Order *order, Channel *tradeChannel)
     // char bufCancel[LWS_PRE + StringLength(json)];
     // memcpy(&bufCancel[LWS_PRE], json, StringLength(json));
     // lws_write(lwsTrade, (unsigned char *)&bufCancel[LWS_PRE], StringLength(json), LWS_WRITE_TEXT);
-    ChannelPut(tradeChannel, json);
+    if (!ChannelPut(tradeChannel, json))
+    {
+        LogError("Trade channel full; dropping order message");
+        free(json);
+        yyjson_mut_doc_free(doc);
+        return -1;
+    } 
     yyjson_mut_doc_free(doc);
     return 0;
 }
@@ -2092,10 +2110,9 @@ tradeThread(void *arg)
                 args->pss->len = len;
                 args->pss->ptr = 0;
 
-                free(message);
-
                 lws_callback_on_writable(args->wsi);
             }
+            free(message);
         }
 
         /*
@@ -2212,7 +2229,7 @@ DashboardRender(
 int
 main()
 {
-    LogInit(LOG_ERROR);
+    LogInit(LOG_INFO);
     Channel tradeChannel;
     ChannelInit(&tradeChannel);
     CURLcode res = curl_global_init(CURL_GLOBAL_ALL);
@@ -2339,7 +2356,6 @@ main()
         LogInfo("Connection failed\n");
         return -1;
     }
-    uint16 loopcount = 0;
     TradeThreadArgs tradeArgs = {
         .channel = &tradeChannel,
         .context = context,
@@ -2384,6 +2400,7 @@ main()
                 LogInfo("LastUpdateId %lu > the first buffered event id!", lastUpdateId);
                 state.isSnapshot = true;
             }
+            yyjson_doc_free(doc);
         }
         else if (state.isSnapshot &&
                  !state.AreEventsApplied)
@@ -2395,10 +2412,6 @@ main()
             IgnoreAndApplyEvents(&state);
         }
 
-        if (loopcount % 1000 == 0) {
-            malloc_trim(0); 
-            loopcount = 0;
-        }
 
         /* on each tick, check if there is a position open,
            if yes, check the loss, if it's >= SL, take the loss
@@ -2429,7 +2442,7 @@ main()
            should be correct, no rejects? 
            one of the biggest assumption here is that there is no other program
            running on the account, so the binance state can be copied here*/
-        
+
         timespec endTime;
         clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
         real64 timeElapsedMS = XtimeElapsedMS(
@@ -2557,12 +2570,10 @@ main()
 
         // apply the event to the order book in the callback, if the OB is ready.
         // lws_service(context, 0);
-
+        //
         // PrintOrderBook(&state);
         // PrintTradeState(&state);
-        loopcount++;
     }
-
 
     lws_context_destroy(context);
     return 0;
