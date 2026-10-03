@@ -1173,7 +1173,6 @@ LoadMarketEvent(yyjson_doc *doc, Market_event *event)
     LogInfo("event type is %s\n", yyjson_get_str(e));
     AddLevelsToEvent(a, event->asks);
     AddLevelsToEvent(b, event->bids);
-    yyjson_doc_free(doc);
 }
 
 void
@@ -1395,6 +1394,7 @@ LoadBufferAndApplyEvent(Market_event marketEvent, State *state, char *input)
     {
         ApplyEvent(marketEvent, OrderBook);
     }
+    yyjson_doc_free(doc);
 }
 
 
@@ -1478,8 +1478,10 @@ CallbackBinance(struct lws *wsi,
     switch (reason)
     {
         case LWS_CALLBACK_CLIENT_ESTABLISHED:
+            {
             LogInfo("callback_binance: LWS_CALLBACK_CLIENT_ESTABLISHED\n");
             break;
+            }
 
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
             LogInfo("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
@@ -2246,7 +2248,7 @@ DashboardRender(
 int
 main()
 {
-    LogInit(LOG_ERROR);
+    LogInit(LOG_INFO);
     Channel tradeChannel;
     ChannelInit(&tradeChannel);
     CURLcode res = curl_global_init(CURL_GLOBAL_ALL);
@@ -2256,6 +2258,11 @@ main()
     }
 
     CURL *curl = curl_easy_init(); // Fresh handle
+    if (curl == NULL)
+    {
+        LogError("curl_easy_init() returned NULL\n");
+        return -1;
+    }
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     
@@ -2308,6 +2315,14 @@ main()
     balances.usdtBalance = &usdtBalance;
     balances.coinBalance = &coinBalance;
     state.balances = &balances;
+    // lws_set_log_level(
+    //     LLL_ERR |
+    //     LLL_WARN |
+    //     LLL_NOTICE |
+    //     LLL_INFO |
+    //     LLL_DEBUG,
+    //     NULL
+    // );
     // | LLL_DEBUG
     // lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO, NULL); 
     LogInfo("running\n");
@@ -2335,7 +2350,7 @@ main()
     ccinfo.context = context;
     ccinfo.address = MARKET_BASE_ENDP;
     ccinfo.port = port;
-    ccinfo.ssl_connection = 1;
+    // ccinfo.ssl_connection = 1;
     ccinfo.path = STREAM_PATH;
     ccinfo.host = ccinfo.address;
     ccinfo.origin = ccinfo.address;
@@ -2399,7 +2414,12 @@ main()
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&state.snapshot);
             CURLcode result = curl_easy_perform(curl);
             if (result != CURLE_OK) {
+                curl_easy_cleanup(curl);
+                free(state.snapshot.resp);
+                state.snapshot.resp = NULL;
+                state.snapshot.size = 0;
                 LogInfo("curl call failed!, %s abort!\n", curl_easy_strerror(result));
+                break;
             }
             char *input = (char *)state.snapshot.resp;
             yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
@@ -2417,6 +2437,7 @@ main()
                 LogInfo("LastUpdateId %lu > the first buffered event id!", lastUpdateId);
                 state.isSnapshot = true;
             }
+            // curl_easy_cleanup(curl);
             yyjson_doc_free(doc);
         }
         else if (state.isSnapshot &&
@@ -2584,7 +2605,7 @@ main()
                 state.orders[++state.currOrderIndex] = closeOrder;
             }
         }
-
+        //
         // apply the event to the order book in the callback, if the OB is ready.
         // lws_service(context, 0);
         //
@@ -2592,6 +2613,7 @@ main()
         // PrintTradeState(&state);
     }
 
+    curl_easy_cleanup(curl);
     lws_context_destroy(context);
     return 0;
 }
