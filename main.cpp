@@ -147,12 +147,14 @@ typedef enum
 {
     PENDING,
     COMPLETED,
-    CANCELLED
+    CANCELLED,
+    REJECTED
 } Order_status;
 
 typedef struct 
 {
     char id[100];
+    char reqId[100]; /* request id */
     char coin[100];
     real64 price;
     real64 qty;
@@ -480,7 +482,7 @@ UpdateOrderFromUserData(
         return;
     }
 
-    for (int i = 0; i <= state->currOrderIndex; i++)
+    for (int i = 0; i < MAX_ORDERS; i++)
     {
         Order *order = &state->orders[i];
 
@@ -601,7 +603,8 @@ UpdateOrderFromUserData(
             strcmp(binanceStatus, "REJECTED") == 0
         )
         {
-            order->status = CANCELLED;
+            order->status = CANCELLED; /* this slot will be seen as empty
+                                        * in state.orders */
         }
         else
         {
@@ -645,6 +648,9 @@ UpdateOrderFromBinance(
     yyjson_val *status =
         yyjson_obj_get(result, "status");
 
+    yyjson_val *reqId =
+        yyjson_obj_get(result, "id");
+
     if (!status)
     {
         LogError("Binance order response missing status");
@@ -669,6 +675,8 @@ UpdateOrderFromBinance(
      */
     const char *localOrderId = NULL;
 
+    
+    
     if (strcmp(binanceStatus, "CANCELED") == 0 &&
         origClientOrderId)
     {
@@ -679,18 +687,11 @@ UpdateOrderFromBinance(
         localOrderId = yyjson_get_str(clientOrderId);
     }
 
-    if (!localOrderId)
-    {
-        LogError(
-            "Couldn't determine local order ID from Binance response"
-        );
-        return;
-    }
 
     /*
      * Find our local order.
      */
-    for (int i = 0; i <= state->currOrderIndex; i++)
+    for (int i = 0; i < MAX_ORDERS; i++)
     {
         Order *order = &state->orders[i];
 
@@ -709,17 +710,6 @@ UpdateOrderFromBinance(
         {
             printf("order filled\n");
             order->status = COMPLETED;
-            /* assumes that there orders are for one position */
-            Assert(0 == strcmp(state->position.symbol, order->coin))
-            real64 qty = (order->side == SELL) ? -order->qty : order->qty;
-            state->position.qty += qty;
-            state->position.price = ((state->position.qty * state->position.price) +
-                                    (qty * order->price)) / qty;
-            state->position.ltp = order->price;
-            state->position.timestamp = order->timestamp;
-            state->position.pnl = qty * order->price +
-                state->position.price *
-                state->position.qty;
         }
         else if (strcmp(binanceStatus, "CANCELED") == 0 ||
                  strcmp(binanceStatus, "EXPIRED") == 0 ||
@@ -885,6 +875,8 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
 
                 if (n < 0) {
                     lwsl_err("ERROR %d writing to ws socket\n", n);
+                    free(pss->buffer);
+                    pss->buffer = NULL;
                     return -1; // Closes the connection cleanly
                 }
 
@@ -1056,7 +1048,28 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                             result
                         );
                     }
-                } 
+                    else
+                    {
+                        yyjson_val *reqId =
+                            yyjson_obj_get(root, "id");
+                            char reqIdStr[100];
+                            strcpy(reqIdStr, yyjson_get_str(reqId));
+                            for (int i = 0; i < MAX_ORDERS; i++)
+                            {
+                                Order *order = &pss->state->orders[i];
+                                if (strcmp(order->reqId, reqIdStr) == 0)
+                                {
+                                    order->status = REJECTED;
+                                    LogInfo(
+                                            "Order %s -> %s",
+                                            order->id,
+                                            "REJECTED" 
+                                           );
+                                    break;
+                                }
+                            }
+                    }
+            } 
 
                 yyjson_doc_free(doc);
 
@@ -1947,17 +1960,14 @@ sendOrder(Order *order, Channel *tradeChannel)
     char qtyStr[32];
     snprintf(priceStr, sizeof(priceStr), "%.2f", order->price);
     snprintf(qtyStr, sizeof(qtyStr), "%.2f", order->qty);
-    char uuidStr[37];
-    generateUUID(uuidStr);
-    strcpy(order->id, uuidStr);
-    generateUUID(uuidStr);
+    
     /* send the order through wsi instance */
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
     // Set root["name"] and root["star"]
-    yyjson_mut_obj_add_str(doc, root, "id", uuidStr);
+    yyjson_mut_obj_add_str(doc, root, "id", order->reqId);
     yyjson_mut_obj_add_str(doc, root, "method", "order.place");
     yyjson_mut_val *params = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_str(doc, params, "apiKey", getenv("API_KEY_SUB"));
@@ -2084,14 +2094,13 @@ cancelOrder(Order *order, Channel *tradeChannel)
 void
 cancelAllOrders(State *state, Channel *tradeChannel)
 {
-    /* using MAX_ORDERS here fucks up the currOrderIndex math here,
-     * leading to no cancellation of orders */
-    for (int i = state->currOrderIndex; i >= 0; i--)
+    for (int i = 0; i < MAX_ORDERS; i++)
     {
-        if (0 != strcmp(state->orders[i].id, ""))
+        if (0 != strcmp(state->orders[i].id, "") &&
+            state->orders[i].status != CANCELLED &&
+            state->orders[i].status != REJECTED)
         {
             cancelOrder(&state->orders[i], tradeChannel);
-            state->currOrderIndex--;
         }
     }
 }
@@ -2244,6 +2253,23 @@ DashboardRender(
 
     fflush(stdout);
 }
+
+int
+putOrderInState(State *state, Order order)
+{
+    for (int i = 0; i < MAX_ORDERS; i++)
+    {
+        if (0 == strcmp(state->orders[i].id, "") ||
+                state->orders[i].status == CANCELLED ||
+                state->orders[i].status == REJECTED)
+        {
+            state->orders[i] = order;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 
 int
 main()
@@ -2536,13 +2562,29 @@ main()
                 sellOrder.qty = 0.1;
                 // sellOrder.price = state.OrderBook.asks[SPREAD_LEVEL].price;
                 sellOrder.status = PENDING; 
-                int res = sendOrder(&buyOrder, &tradeChannel);
-                res = sendOrder(&sellOrder, &tradeChannel);
-                /* NOTE(Akhil): this should always be after send order
-                 *              if its not a pointer, since send generates
-                 *              the uuid */
-                state.orders[++state.currOrderIndex] = buyOrder;
-                state.orders[++state.currOrderIndex] = sellOrder;
+                char uuidStr[37];
+                generateUUID(uuidStr);
+                strcpy(buyOrder.id, uuidStr);
+                generateUUID(uuidStr);
+                strcpy(sellOrder.id, uuidStr);
+                generateUUID(uuidStr);
+                strcpy(buyOrder.reqId, uuidStr);
+                generateUUID(uuidStr);
+                strcpy(sellOrder.reqId, uuidStr);
+                int res = putOrderInState(&state, buyOrder);
+                if (res >= 0)
+                {
+                    /* assuming orders will be cancelled and we will have 
+                     * slots to fill in state.orders */
+                    int res = sendOrder(&buyOrder, &tradeChannel);
+                }
+                res = putOrderInState(&state, sellOrder);
+                if (res >= 0)
+                {
+                    /* assuming orders will be cancelled and we will have 
+                     * slots to fill in state.orders */
+                    int res = sendOrder(&sellOrder, &tradeChannel);
+                }
             }
         }
         else
@@ -2574,9 +2616,15 @@ main()
 
                 closeOrder.status = PENDING;
                 strcpy(closeOrder.coin, state.position.symbol);
-                int res = sendOrder(&closeOrder, &tradeChannel);
-                if (res < 0) LogInfo("couldn't close order \n");
-                state.orders[++state.currOrderIndex] = closeOrder;
+                char uuidStr[37];
+                generateUUID(uuidStr);
+                strcpy(closeOrder.id, uuidStr);
+                int res = putOrderInState(&state, closeOrder);
+                if (res >= 0)
+                {
+                    int res = sendOrder(&closeOrder, &tradeChannel);
+                    if (res < 0) LogInfo("couldn't close order \n");
+                }
             }
             else if (timeElapsedMS >= MIN_REFRESH_TIME)
             {
@@ -2600,9 +2648,15 @@ main()
                     sellPrice : buyPrice;
                 closeOrder.status = PENDING;
                 strcpy(closeOrder.coin, state.position.symbol);
-                int res = sendOrder(&closeOrder, &tradeChannel);
-                if (res < 0) LogInfo("couldn't close order \n");
-                state.orders[++state.currOrderIndex] = closeOrder;
+                char uuidStr[37];
+                generateUUID(uuidStr);
+                strcpy(closeOrder.id, uuidStr);
+                int res = putOrderInState(&state, closeOrder);
+                if (res >= 0)
+                {
+                    int res = sendOrder(&closeOrder, &tradeChannel);
+                    if (res < 0) LogInfo("couldn't close order \n");
+                }
             }
         }
         //
@@ -2617,336 +2671,3 @@ main()
     lws_context_destroy(context);
     return 0;
 }
-
-// if ((time(NULL) - state.lastTradeTime > 10)) {
-        //     LogInfo("No data — reconnecting\n");
-        //     fflush(stdout);
-        //
-        //     lws_context_destroy(context);
-        //     context = lws_create_context(&info);
-        //     ccinfoTrade.context = context;
-        //     lwsTrade = lws_client_connect_via_info(&ccinfoTrade); 
-        //     if (lwsTrade == NULL)
-        //     {
-        //         LogInfo("Connection failed\n");
-        //         return -1;
-        //     }
-        //
-        //     state.lastTradeTime = time(NULL);
-        // } 
-        //
-        // if (state.shouldPlaceOrder)
-        // {
-        //     timespec endTime;
-        //     clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
-        //     real64 timeElapsedMS = XtimeElapsedMS(
-        //         state.lastTime,
-        //         endTime
-        //     );
-        //     real64 lastPrice = state.
-        //             TradeEventsBuffer.
-        //             buffer[MAX_EVENTS - 1].price;
-        //     uint64 timestamp = BinanceTimestamp();
-        //     char body[900];
-        //     char time_str[32];
-        //     if (state.orderType == OPENBUY)
-        //     {
-        //         LogInfo("opening the position after %f at lastPrice %f\n",
-        //                timeElapsedMS,
-        //                lastPrice);
-        //         // make the order call.
-        //         sLogInfo(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
-        //                 "SOLUSDT",
-        //                 "BUY",
-        //                 "MARKET",
-        //                 0.1,
-        //                 timestamp);
-        //         LogInfo("body is %s, api key is %s\n", body, getenv("API_KEY"));
-        //         bool res = BinanceMakeOrder(body);
-        //         if (res)
-        //         {
-        //             Trade trade = {};
-        //             real64 qty = 0.1;
-        //             trade.qty = qty;
-        //             trade.price = lastPrice;
-        //             trade.side = BUY;
-        //             trade.usdtAfterFee = (qty * lastPrice) * (1 - TRADE_FEE);
-        //             trade.qtyAfterFee = trade.usdtAfterFee / lastPrice; 
-        //             position.qty += trade.qtyAfterFee;
-        //             position.price = lastPrice;
-        //             wallet.coin += trade.qtyAfterFee;
-        //             wallet.usdt -= qty * lastPrice;
-        //             formatMSTimestamp(timestamp, time_str, sizeof(time_str));
-        //             sLogInfo(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
-        //                     timestamp,
-        //                     time_str,
-        //                     "SOLUSDT",
-        //                     "BUY",
-        //                     lastPrice,
-        //                     qty,
-        //                     position.qty * position.price,
-        //                     trade.usdtAfterFee,
-        //                     trade.qtyAfterFee,
-        //                     0.0);
-        //             fputs(StringCat(body, "\n"), outputFile);
-        //             state.posnType = LONG;
-        //             state.timeToClose = timeElapsedMS;
-        //             state.lastTime = endTime;
-        //             state.isOpen = true;
-        //             state.buyPressure = 0.0;
-        //             state.sellPressure = 0.0;
-        //         }
-        //     }
-        //     else if (state.orderType == OPENSELL)
-        //     {
-        //         LogInfo("opening the position after %f at lastPrice %f\n",
-        //                timeElapsedMS,
-        //                lastPrice);
-        //         // make the order call.
-        //         sLogInfo(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
-        //                 "SOLUSDT",
-        //                 "SELL",
-        //                 "MARKET",
-        //                 0.1,
-        //                 timestamp);
-        //         LogInfo("body is %s, api key is %s\n", body, getenv("API_KEY"));
-        //         bool res = BinanceMakeOrder(body);
-        //         if (res)
-        //         {
-        //             Trade trade = {};
-        //             real64 qty = -0.1;
-        //             trade.qty = qty;
-        //             trade.price = lastPrice;
-        //             trade.side = SELL;
-        //             trade.qtyAfterFee = (qty) * (1 - TRADE_FEE);
-        //             trade.usdtAfterFee = trade.qtyAfterFee * lastPrice; 
-        //             position.qty += trade.qtyAfterFee;
-        //             position.price = lastPrice;
-        //             wallet.coin += qty;
-        //             wallet.usdt -= trade.qtyAfterFee * lastPrice;
-        //             formatMSTimestamp(timestamp, time_str, sizeof(time_str));
-        //             // make the order call.
-        //             sLogInfo(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
-        //                     timestamp,
-        //                     time_str,
-        //                     "SOLUSDT",
-        //                     "SELL",
-        //                     lastPrice,
-        //                     qty,
-        //                     position.qty * position.price,
-        //                     trade.usdtAfterFee,
-        //                     trade.qtyAfterFee,
-        //                     0.0);
-        //             fputs(StringCat(body, "\n"), outputFile);
-        //             state.posnType = SHORT;
-        //             state.timeToClose = timeElapsedMS;
-        //             state.lastTime = endTime;
-        //             state.isOpen = true;
-        //             state.buyPressure = 0.0;
-        //             state.sellPressure = 0.0;
-        //         }
-        //     }
-        //     else if (state.orderType == LOADBUY)
-        //     {
-        //         sLogInfo(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
-        //                 "SOLUSDT",
-        //                 "SELL",
-        //                 "MARKET",
-        //                 0.1,
-        //                 timestamp);
-        //         LogInfo("body is %s, api key is %s\n", body, getenv("API_KEY"));
-        //         if (BinanceMakeOrder(body))
-        //         {
-        //             Trade trade = {};
-        //             real64 qty = 0.1;
-        //             trade.qty = qty;
-        //             trade.price = lastPrice;
-        //             trade.side = BUY;
-        //             trade.usdtAfterFee = (qty * lastPrice) * (1 - TRADE_FEE);
-        //             trade.qtyAfterFee = trade.usdtAfterFee / lastPrice; 
-        //             position.qty += trade.qtyAfterFee;
-        //             position.price = lastPrice;
-        //             wallet.coin += trade.qtyAfterFee; 
-        //             wallet.usdt -= qty * lastPrice;
-        //             formatMSTimestamp(timestamp, time_str, sizeof(time_str));
-        //
-        //             sLogInfo(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
-        //                     timestamp,
-        //                     time_str,
-        //                     "SOLUSDT",
-        //                     "BUY",
-        //                     lastPrice,
-        //                     qty,
-        //                     position.qty * position.price,
-        //                     trade.usdtAfterFee,
-        //                     trade.qtyAfterFee,
-        //                     0.0);
-        //             fputs(StringCat(body, "\n"), outputFile);
-        //             state.startPrice = lastPrice;
-        //             state.lastTime = endTime;
-        //             state.buyPressure = 0.0;
-        //             state.sellPressure = 0.0;
-        //             state.timeToClose *= 2;
-        //         }
-        //     }
-        //     else if (state.orderType == LOADSELL)
-        //     {
-        //         sLogInfo(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
-        //                 "SOLUSDT",
-        //                 "SELL",
-        //                 "MARKET",
-        //                 0.1,
-        //                 timestamp);
-        //         LogInfo("body is %s, api key is %s\n", body, getenv("API_KEY"));
-        //         if (BinanceMakeOrder(body))
-        //         {
-        //             Trade trade = {};
-        //             real64 qty = -0.1;
-        //             trade.qty = qty;
-        //             trade.price = lastPrice;
-        //             trade.side = SELL;
-        //             trade.qtyAfterFee = (qty) * (1 - TRADE_FEE);
-        //             trade.usdtAfterFee = trade.qtyAfterFee * lastPrice; 
-        //             position.qty += trade.qtyAfterFee;
-        //             position.price = lastPrice;
-        //             wallet.coin += qty;
-        //             wallet.usdt -= trade.qtyAfterFee * lastPrice; 
-        //             formatMSTimestamp(timestamp, time_str, sizeof(time_str));
-        //
-        //             // make the order call.
-        //             sLogInfo(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
-        //                     timestamp,
-        //                     time_str,
-        //                     "SOLUSDT",
-        //                     "SELL",
-        //                     lastPrice,
-        //                     qty,
-        //                     position.qty * position.price,
-        //                     trade.usdtAfterFee,
-        //                     trade.qtyAfterFee,
-        //                     0.0); 
-        //             fputs(StringCat(body, "\n"), outputFile);
-        //             state.startPrice = lastPrice;
-        //             state.lastTime = endTime;
-        //             state.buyPressure = 0.0;
-        //             state.sellPressure = 0.0;
-        //             state.timeToClose *= 2;
-        //         }
-        //     }
-        //     else if (state.orderType == CLOSELONG)
-        //     {
-        //         sLogInfo(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
-        //                 "SOLUSDT",
-        //                 "SELL",
-        //                 "MARKET",
-        //                 0.1,
-        //                 timestamp);
-        //         if (BinanceMakeOrder(body))
-        //         {
-        //             Trade trade = {};
-        //             real64 currPosValue = position.qty * lastPrice;
-        //             real64 prevPosValue = position.qty * position.price;
-        //             real64 qty = -position.qty;
-        //             trade.qty = qty;
-        //             trade.price = lastPrice;
-        //             trade.side = SELL;
-        //             trade.qtyAfterFee = (qty) * (1 - TRADE_FEE);
-        //             trade.usdtAfterFee = trade.qtyAfterFee * lastPrice; 
-        //             position.qty += trade.qtyAfterFee;
-        //             position.price = lastPrice;
-        //             wallet.coin += qty;
-        //             wallet.usdt -= trade.qtyAfterFee * lastPrice; 
-        //             formatMSTimestamp(timestamp, time_str, sizeof(time_str));
-        //
-        //             sLogInfo(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
-        //                     timestamp,
-        //                     time_str,
-        //                     "SOLUSDT",
-        //                     "SELL",
-        //                     lastPrice,
-        //                     qty,
-        //                     position.qty * position.price,
-        //                     trade.usdtAfterFee,
-        //                     trade.qtyAfterFee,
-        //                     currPosValue - prevPosValue);
-        //             fputs(StringCat(body, "\n"), outputFile);
-        //             state.posnType = ZERO;
-        //             state.isOpen = false;
-        //             state.startPrice = lastPrice;
-        //             state.lastTime = endTime;
-        //             state.buyPressure = 0.0;
-        //             state.sellPressure = 0.0;
-        //         }
-        //     }
-        //     else if (state.orderType == CLOSESHORT)
-        //     {
-        //         sLogInfo(body, "symbol=%s&side=%s&type=%s&quantity=%f&timestamp=%lu",
-        //                 "SOLUSDT",
-        //                 "BUY",
-        //                 "MARKET",
-        //                 0.1,
-        //                 timestamp);
-        //         if (BinanceMakeOrder(body))
-        //         {
-        //             Trade trade = {};
-        //             real64 currPosValue = position.qty * lastPrice;
-        //             real64 prevPosValue = position.qty * position.price;
-        //             real64 qty = -position.qty;
-        //             trade.qty = qty;
-        //             trade.price = lastPrice;
-        //             trade.side = BUY;
-        //             trade.usdtAfterFee = (qty * lastPrice) * (1 - TRADE_FEE);
-        //             trade.qtyAfterFee = trade.usdtAfterFee / lastPrice; 
-        //             position.qty += trade.qtyAfterFee;
-        //             position.price = lastPrice;
-        //             wallet.coin += trade.qtyAfterFee; 
-        //             wallet.usdt -= qty * lastPrice;
-        //             formatMSTimestamp(timestamp, time_str, sizeof(time_str));
-        //
-        //             sLogInfo(body, "%lu, %s, %s, %s, %f, %f, %f, %f, %f, %f",
-        //                     timestamp,
-        //                     time_str,
-        //                     "SOLUSDT",
-        //                     "BUY",
-        //                     lastPrice,
-        //                     qty,
-        //                     position.qty * position.price,
-        //                     trade.usdtAfterFee,
-        //                     trade.qtyAfterFee,
-        //                     currPosValue - prevPosValue);
-        //             fputs(StringCat(body, "\n"), outputFile);
-        //             state.posnType = ZERO;
-        //             state.isOpen = false;
-        //             state.startPrice = lastPrice;
-        //             state.lastTime = endTime;
-        //             state.buyPressure = 0.0;
-        //             state.sellPressure = 0.0;
-        //         }
-        //     }
-        //     state.shouldPlaceOrder = false;
-        // }
-// struct lws_protocols protocolTrade = {};
-    // protocol.name = "binance-trade";
-    // protocol.callback = CallbackBinanceTrade;
-    // protocol.per_session_data_size = 256;
-    //
-    // struct lws_client_connect_info ccinfoTrade = {};
-    // ccinfoTrade.context = context;
-    // ccinfoTrade.address = MARKET_BASE_ENDP;
-    // ccinfoTrade.port = port;
-    // ccinfoTrade.ssl_connection = 1;
-    // ccinfoTrade.path = TRADE_STREAM_PATH;
-    // ccinfoTrade.host = ccinfoTrade.address;
-    // ccinfoTrade.origin = ccinfoTrade.address;
-    // ccinfoTrade.ssl_connection = LCCSCF_USE_SSL;
-    // ccinfoTrade.ietf_version_or_minus_one = -1;
-    // ccinfoTrade.protocol = "binance-trade";
-    // ccinfoTrade.userdata = (void *)&state;
-    // struct lws *lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
-    // if (lwsTrade == NULL)
-    // {
-    //     LogInfo("Connection failed\n");
-    //     return -1;
-    // }
-
-
