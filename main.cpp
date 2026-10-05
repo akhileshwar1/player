@@ -2619,6 +2619,8 @@ main()
                 char uuidStr[37];
                 generateUUID(uuidStr);
                 strcpy(closeOrder.id, uuidStr);
+                generateUUID(uuidStr);
+                strcpy(closeOrder.reqId, uuidStr);
                 int res = putOrderInState(&state, closeOrder);
                 if (res >= 0)
                 {
@@ -2651,6 +2653,8 @@ main()
                 char uuidStr[37];
                 generateUUID(uuidStr);
                 strcpy(closeOrder.id, uuidStr);
+                generateUUID(uuidStr);
+                strcpy(closeOrder.reqId, uuidStr);
                 int res = putOrderInState(&state, closeOrder);
                 if (res >= 0)
                 {
