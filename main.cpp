@@ -450,8 +450,6 @@ UpdateOrderFromUserData(
     yyjson_val *event
 )
 {
-    yyjson_val *clientOrderId =
-        yyjson_obj_get(event, "c");
 
     yyjson_val *orderStatus =
         yyjson_obj_get(event, "X");
@@ -459,17 +457,33 @@ UpdateOrderFromUserData(
     yyjson_val *executionType =
         yyjson_obj_get(event, "x");
 
-    if (!clientOrderId || !orderStatus)
+    if (!orderStatus)
     {
-        LogError("executionReport missing c or X");
+        LogError("executionReport missing X");
         return;
     }
 
-    const char *localOrderId =
-        yyjson_get_str(clientOrderId);
-
     const char *binanceStatus =
         yyjson_get_str(orderStatus);
+
+    const char *localOrderId;
+    yyjson_val *clientOrderId;
+    if (0 == strcmp(binanceStatus, "CANCELED"))
+    {
+        clientOrderId =
+            yyjson_obj_get(event, "C");
+
+        localOrderId =
+            yyjson_get_str(clientOrderId);
+    }
+    else
+    {
+        clientOrderId =
+            yyjson_obj_get(event, "c");
+
+        localOrderId =
+            yyjson_get_str(clientOrderId);
+    }
 
     const char *binanceExecution =
         executionType
@@ -633,6 +647,12 @@ UpdateOrderFromUserData(
     );
 }
 
+quote
+getBestQuote(Order_book *orderBook)
+{
+    return orderBook->bids[0];
+}
+
 static void
 UpdateOrderFromBinance(
     State *state,
@@ -710,6 +730,110 @@ UpdateOrderFromBinance(
         {
             printf("order filled\n");
             order->status = COMPLETED;
+            yyjson_val *executedQtyVal =
+                yyjson_obj_get(result, "executedQty");
+
+            // yyjson_val *executionPriceVal =
+            //     yyjson_obj_get(result, "L");
+
+            real64 executedQty =
+                executedQtyVal
+                ? atof(yyjson_get_str(executedQtyVal))
+                : 0.0;
+
+            /* TODO(Akhil): take it from fills of the json 
+             * {"id":"da6bee4d-2f5e-4946-9827-448fa1acabcd","status":200,
+             "result":{"symbol":"SOLUSDT","orderId":17934099462,"orderListId":-1,
+             "clientOrderId":"ca470db5-06f1-48fc-b6cb-d48d75a156b5",
+             "transactTime":1791198318925,"price":"0.00000000","origQty":"0.10000000",
+             "executedQty":"0.10000000","origQuoteOrderQty":"0.00000000",
+             "cummulativeQuoteQty":"12.05100000","status":"FILLED","timeInForce":"GTC",
+             "type":"MARKET","side":"BUY",
+             "workingTime":1791198318925,"fills":[{"price":"120.51000000","qty":"0.10000000",
+             "commission":"0.00010000","commissionAsset":"SOL",
+             "tradeId":2072821848}],
+             "selfTradePreventionMode":"EXPIRE_MAKER"},
+             "rateLimits":[{"rateLimitType":"ORDERS",
+             "interval":"SECOND","intervalNum":10,"limit":100,"count":1},{"rateLimitType"' */
+            real64 executionPrice = getBestQuote(&state->OrderBook).price;
+                // executionPriceVal
+                // ? atof(yyjson_get_str(executionPriceVal))
+                // : 0.0;
+
+            LogInfo(
+                    "FILLED %s qty=%.8f price=%.8f",
+                    order->id,
+                    executedQty,
+                    executionPrice
+                   );
+
+            /*
+             * Position update.
+             */
+            Assert(
+                    state->position.symbol == NULL ||
+                    strcmp(
+                        state->position.symbol,
+                        order->coin
+                        ) == 0
+                  )
+
+                real64 signedQty =
+                (order->side == SELL)
+                ? -executedQty
+                : executedQty;
+
+            real64 oldQty =
+                state->position.qty;
+
+            real64 oldPrice =
+                state->position.price;
+
+            real64 newQty =
+                oldQty + signedQty;
+
+            /*
+             * Opening / adding to a position.
+             */
+            if (oldQty == 0.0)
+            {
+                state->position.price = executionPrice;
+            }
+            else if (
+                    (oldQty > 0.0 && signedQty > 0.0) ||
+                    (oldQty < 0.0 && signedQty < 0.0)
+                    )
+            {
+                /*
+                 * Adding to the same side:
+                 * weighted average entry price.
+                 */
+                state->position.price =
+                    (
+                     fabs(oldQty) * oldPrice +
+                     fabs(signedQty) * executionPrice
+                    )
+                    /
+                    fabs(newQty);
+            }
+            else if (newQty == 0.0)
+            {
+                /*
+                 * Fully closed.
+                 */
+                state->position.price = 0.0;
+            }
+
+            state->position.qty =
+                newQty;
+
+            state->position.ltp =
+                executionPrice;
+
+            /* realised pnl */
+            state->position.pnl = (signedQty * executionPrice) + (oldQty * oldPrice);
+            state->position.timestamp =
+                order->timestamp;
         }
         else if (strcmp(binanceStatus, "CANCELED") == 0 ||
                  strcmp(binanceStatus, "EXPIRED") == 0 ||
@@ -1945,11 +2069,7 @@ IgnoreAndApplyEvents(State *state)
     }
 }
 
-quote
-getBestQuote(Order_book *orderBook)
-{
-    return orderBook->bids[0];
-}
+
 
 
 
@@ -1987,13 +2107,12 @@ sendOrder(Order *order, Channel *tradeChannel)
     {
         snprintf(body,
                  sizeof(body),
-                 "apiKey=%s&newClientOrderId=%s&quantity=%s&side=%s&symbol=%s&timeInForce=%s&timestamp=%lu&type=%s",
+                 "apiKey=%s&newClientOrderId=%s&quantity=%s&side=%s&symbol=%s&timestamp=%lu&type=%s",
                  getenv("API_KEY_SUB"),
                  order->id,
                  qtyStr,
                  OrderSideString[order->side],
                  order->coin,
-                 "GTC",
                  timestamp,
                  OrderTypeString[order->type]);
     }
@@ -2018,7 +2137,10 @@ sendOrder(Order *order, Channel *tradeChannel)
     generate_signature(body, getenv("API_SECRET_SUB"), signature);
     yyjson_mut_obj_add_str(doc, params, "signature", signature);
     yyjson_mut_obj_add_str(doc, params, "symbol", order->coin);
-    yyjson_mut_obj_add_str(doc, params, "timeInForce", "GTC");
+    if (order->type == LIMIT)
+    {
+        yyjson_mut_obj_add_str(doc, params, "timeInForce", "GTC");
+    }
     yyjson_mut_obj_add_int(doc, params, "timestamp", timestamp);
     yyjson_mut_obj_add_str(doc, params, "type", OrderTypeString[order->type]);
     yyjson_mut_obj_add_val(doc, root, "params", params);
@@ -2098,7 +2220,8 @@ cancelAllOrders(State *state, Channel *tradeChannel)
     {
         if (0 != strcmp(state->orders[i].id, "") &&
             state->orders[i].status != CANCELLED &&
-            state->orders[i].status != REJECTED)
+            state->orders[i].status != REJECTED &&
+            state->orders[i].status != COMPLETED)
         {
             cancelOrder(&state->orders[i], tradeChannel);
         }
@@ -2261,7 +2384,8 @@ putOrderInState(State *state, Order order)
     {
         if (0 == strcmp(state->orders[i].id, "") ||
                 state->orders[i].status == CANCELLED ||
-                state->orders[i].status == REJECTED)
+                state->orders[i].status == REJECTED ||
+                state->orders[i].status == COMPLETED)
         {
             state->orders[i] = order;
             return 0;
