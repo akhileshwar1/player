@@ -30,6 +30,7 @@
 #define MAX_ORDERS 10 
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */ 
 #define SPREAD_PCT 0.3 /* spread . */ 
+#define STEP_SIZE 0.001
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
@@ -556,8 +557,8 @@ UpdateOrderFromUserData(
 
             real64 signedQty =
                 (order->side == SELL)
-                    ? -executedQty
-                    : executedQty;
+                    ? -(executedQty * (1 - (0.075 / 100)))
+                    : (executedQty * (1 - (0.075 / 100))); // apply fees
 
             real64 oldQty =
                 state->position.qty;
@@ -566,9 +567,9 @@ UpdateOrderFromUserData(
                 state->position.price;
 
             real64 newQty =
-                oldQty + signedQty;
+                floor((oldQty + signedQty) / STEP_SIZE) * STEP_SIZE;
 
-            /*
+          /*
              * Opening / adding to a position.
              */
             if (oldQty == 0.0)
@@ -780,8 +781,8 @@ UpdateOrderFromBinance(
 
                 real64 signedQty =
                 (order->side == SELL)
-                ? -executedQty
-                : executedQty;
+               ? -(executedQty * (1 - (0.075 / 100)))
+               : (executedQty * (1 - (0.075 / 100))); // apply fees 
 
             real64 oldQty =
                 state->position.qty;
@@ -790,7 +791,7 @@ UpdateOrderFromBinance(
                 state->position.price;
 
             real64 newQty =
-                oldQty + signedQty;
+                floor((oldQty + signedQty) / STEP_SIZE) * STEP_SIZE;
 
             /*
              * Opening / adding to a position.
@@ -2078,8 +2079,10 @@ sendOrder(Order *order, Channel *tradeChannel)
 {
     char priceStr[32];
     char qtyStr[32];
+
+    order->qty = floor(order->qty / STEP_SIZE) * STEP_SIZE;
     snprintf(priceStr, sizeof(priceStr), "%.2f", order->price);
-    snprintf(qtyStr, sizeof(qtyStr), "%.2f", order->qty);
+    snprintf(qtyStr, sizeof(qtyStr), "%.3f", order->qty);
     
     /* send the order through wsi instance */
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
@@ -2677,13 +2680,13 @@ main()
                 strcpy(buyOrder.coin, "SOLUSDT");
                 buyOrder.side = BUY;
                 buyOrder.type = LIMIT;
-                buyOrder.qty = 0.1;
+                buyOrder.qty = 0.15;
                 // buyOrder.price = state.OrderBook.bids[SPREAD_LEVEL].price; 
                 buyOrder.status = PENDING; 
                 strcpy(sellOrder.coin, "SOLUSDT");
                 sellOrder.side = SELL;
                 sellOrder.type = LIMIT;
-                sellOrder.qty = 0.1;
+                sellOrder.qty = 0.15;
                 // sellOrder.price = state.OrderBook.asks[SPREAD_LEVEL].price;
                 sellOrder.status = PENDING; 
                 char uuidStr[37];
@@ -2734,10 +2737,7 @@ main()
                 closeOrder.timestamp = XgetTimestamp();
                 closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
                 closeOrder.type = MARKET;
-                closeOrder.qty =
-                    (state.position.qty > 0) ?
-                    fabs(state.balances->coinBalance->free) : 0.1;
-
+                closeOrder.qty = fabs(state.position.qty) * (1 + (0.075 / 100));
                 closeOrder.status = PENDING;
                 strcpy(closeOrder.coin, state.position.symbol);
                 char uuidStr[37];
@@ -2751,6 +2751,8 @@ main()
                     int res = sendOrder(&closeOrder, &tradeChannel);
                     if (res < 0) LogInfo("couldn't close order \n");
                 }
+                /*TODO(Akhil): this is a fix, i just want it to start quoting again */
+                // state.position.qty = 0;
             }
             else if (timeElapsedMS >= MIN_REFRESH_TIME)
             {
@@ -2767,10 +2769,8 @@ main()
                 closeOrder.timestamp = XgetTimestamp();
                 closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
                 closeOrder.type = LIMIT;
-                closeOrder.qty =
-                    (state.position.qty > 0) ?
-                    fabs(state.balances->coinBalance->free) : 0.1;
-                closeOrder.price = (state.balances->coinBalance->free > 0) ?
+                closeOrder.qty =fabs(state.position.qty) * (1 + (0.075 / 100)); 
+                closeOrder.price = (state.position.qty > 0) ?
                     sellPrice : buyPrice;
                 closeOrder.status = PENDING;
                 strcpy(closeOrder.coin, state.position.symbol);
