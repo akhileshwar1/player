@@ -31,6 +31,7 @@
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */ 
 #define SPREAD_PCT 0.3 /* spread . */ 
 #define STEP_SIZE 0.001
+#define POSITION_EPSILON 0.01
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
@@ -557,8 +558,8 @@ UpdateOrderFromUserData(
 
             real64 signedQty =
                 (order->side == SELL)
-                    ? -(executedQty * (1 - (0.075 / 100)))
-                    : (executedQty * (1 - (0.075 / 100))); // apply fees
+                    ? -(executedQty)
+                    : (executedQty);
 
             real64 oldQty =
                 state->position.qty;
@@ -781,8 +782,8 @@ UpdateOrderFromBinance(
 
                 real64 signedQty =
                 (order->side == SELL)
-               ? -(executedQty * (1 - (0.075 / 100)))
-               : (executedQty * (1 - (0.075 / 100))); // apply fees 
+               ? -(executedQty)
+               : (executedQty);
 
             real64 oldQty =
                 state->position.qty;
@@ -993,7 +994,10 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
 
                 // 3. Set up framing flags based on whether this is the final chunk
                 int is_final_fragment = (pss->ptr + chunk_size >= pss->len);
+                uint64 now = BinanceTimestamp();
 
+                LogInfo("TIMESTAMP NOW: %lu, %s\n",
+                        now);
                 // 4. Perform the SINGLE allowed lws_write() call for this callback event
                 // Note: lws_write expects the pointer to start AFTER the LWS_PRE padding
                 int n = lws_write(wsi, &pss->buffer[LWS_PRE + pss->ptr], chunk_size, LWS_WRITE_TEXT);
@@ -1637,7 +1641,7 @@ CallbackBinance(struct lws *wsi,
                 char buf[4096 * 10];
                 memcpy(buf, in, len);
                 buf[len] = '\0';
-                LogInfo("rx %d '%s'\n", (int)len, buf);
+                // LogInfo("rx %d '%s'\n", (int)len, buf);
                 Market_event marketEvent = {};
                 // TODO(Akhil): There's a double copy happening here,
                 //              could be simpler.
@@ -1655,7 +1659,7 @@ CallbackBinance(struct lws *wsi,
                 isComplete = IsEventComplete(((State *)user)->event); 
                 if (isComplete)
                 {
-                    LogInfo("NOT null anymore %s\n", ((State *)user)->event);
+                    // LogInfo("NOT null anymore %s\n", ((State *)user)->event);
                     LoadBufferAndApplyEvent(marketEvent, (State *)user, buf);
                     memset(state->event, 0, sizeof(state->event));
                 }
@@ -2105,6 +2109,7 @@ sendOrder(Order *order, Channel *tradeChannel)
      *              alphabetically, and the price and quantities should be 
      *              same in query string and params json to the decimal point */
     uint64 timestamp = BinanceTimestamp();
+    LogInfo("TIMESTAMP CREATED: %lu\n", timestamp);
     char body[1024];
     if (order->type == MARKET)
     {
@@ -2651,8 +2656,9 @@ main()
         }
 
         LogInfo("state position qty is %f\n", state.position.qty);
-        if (state.position.qty == 0)
-        {
+        if (fabs(state.position.qty) < POSITION_EPSILON)
+        {    
+            state.position.qty = 0.0;
             /* check if refresh and
                create the pair of orders with the target spread. */
             real64 timeElapsedMS = XtimeElapsedMS(
@@ -2737,7 +2743,7 @@ main()
                 closeOrder.timestamp = XgetTimestamp();
                 closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
                 closeOrder.type = MARKET;
-                closeOrder.qty = fabs(state.position.qty) * (1 + (0.075 / 100));
+                closeOrder.qty = fabs(state.position.qty);
                 closeOrder.status = PENDING;
                 strcpy(closeOrder.coin, state.position.symbol);
                 char uuidStr[37];
@@ -2769,7 +2775,7 @@ main()
                 closeOrder.timestamp = XgetTimestamp();
                 closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
                 closeOrder.type = LIMIT;
-                closeOrder.qty =fabs(state.position.qty) * (1 + (0.075 / 100)); 
+                closeOrder.qty =fabs(state.position.qty); 
                 closeOrder.price = (state.position.qty > 0) ?
                     sellPrice : buyPrice;
                 closeOrder.status = PENDING;
