@@ -31,7 +31,7 @@
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */ 
 #define SPREAD_PCT 0.3 /* spread . */ 
 #define STEP_SIZE 0.001
-#define POSITION_EPSILON 0.01
+#define POSITION_EPSILON 0.1
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
@@ -182,6 +182,7 @@ typedef struct timespec timespec;
 typedef struct
 {
     char event[4096 * 10];
+    char tradeEvent[4096 * 10];
     Market_events_buffer MarketEventsBuffer;
     Trade_events_buffer TradeEventsBuffer;
     Snapshot snapshot;
@@ -511,107 +512,114 @@ UpdateOrderFromUserData(
         if (strcmp(binanceStatus, "NEW") == 0 ||
             strcmp(binanceStatus, "PARTIALLY_FILLED") == 0)
         {
-            order->status = PENDING;
+            if (order->status != COMPLETED)
+            {
+                order->status = PENDING;
+            }
         }
         else if (strcmp(binanceStatus, "FILLED") == 0)
         {
             LogInfo("order filled\n");
-            order->status = COMPLETED;
+            if (order->status != COMPLETED)
+            {
 
-            /*
-             * Use actual execution information from the
-             * user-data event, not the original order qty/price.
-             */
-            yyjson_val *executedQtyVal =
-                yyjson_obj_get(event, "l");
+                order->status = COMPLETED;
 
-            yyjson_val *executionPriceVal =
-                yyjson_obj_get(event, "L");
+                /*
+                 * Use actual execution information from the
+                 * user-data event, not the original order qty/price.
+                 */
+                yyjson_val *executedQtyVal =
+                    yyjson_obj_get(event, "l");
 
-            real64 executedQty =
-                executedQtyVal
+                yyjson_val *executionPriceVal =
+                    yyjson_obj_get(event, "L");
+
+                real64 executedQty =
+                    executedQtyVal
                     ? atof(yyjson_get_str(executedQtyVal))
                     : 0.0;
 
-            real64 executionPrice =
-                executionPriceVal
+                real64 executionPrice =
+                    executionPriceVal
                     ? atof(yyjson_get_str(executionPriceVal))
                     : 0.0;
 
-            LogInfo(
-                "FILLED %s qty=%.8f price=%.8f",
-                order->id,
-                executedQty,
-                executionPrice
-            );
+                LogInfo(
+                        "FILLED %s qty=%.8f price=%.8f",
+                        order->id,
+                        executedQty,
+                        executionPrice
+                       );
 
-            /*
-             * Position update.
-             */
-            Assert(
-                state->position.symbol == NULL ||
-                strcmp(
-                    state->position.symbol,
-                    order->coin
-                ) == 0
-            )
+                /*
+                 * Position update.
+                 */
+                Assert(
+                        state->position.symbol == NULL ||
+                        strcmp(
+                            state->position.symbol,
+                            order->coin
+                            ) == 0
+                      )
 
-            real64 signedQty =
-                (order->side == SELL)
+                    real64 signedQty =
+                    (order->side == SELL)
                     ? -(executedQty)
                     : (executedQty);
 
-            real64 oldQty =
-                state->position.qty;
+                real64 oldQty =
+                    state->position.qty;
 
-            real64 oldPrice =
-                state->position.price;
+                real64 oldPrice =
+                    state->position.price;
 
-            real64 newQty =
-                floor((oldQty + signedQty) / STEP_SIZE) * STEP_SIZE;
+                real64 newQty =
+                    floor((oldQty + signedQty) / STEP_SIZE) * STEP_SIZE;
 
-          /*
-             * Opening / adding to a position.
-             */
-            if (oldQty == 0.0)
-            {
-                state->position.price = executionPrice;
-            }
-            else if (
-                (oldQty > 0.0 && signedQty > 0.0) ||
-                (oldQty < 0.0 && signedQty < 0.0)
-            )
-            {
                 /*
-                 * Adding to the same side:
-                 * weighted average entry price.
+                 * Opening / adding to a position.
                  */
-                state->position.price =
-                    (
-                        fabs(oldQty) * oldPrice +
-                        fabs(signedQty) * executionPrice
-                    )
-                    /
-                    fabs(newQty);
+                if (oldQty == 0.0)
+                {
+                    state->position.price = executionPrice;
+                }
+                else if (
+                        (oldQty > 0.0 && signedQty > 0.0) ||
+                        (oldQty < 0.0 && signedQty < 0.0)
+                        )
+                {
+                    /*
+                     * Adding to the same side:
+                     * weighted average entry price.
+                     */
+                    state->position.price =
+                        (
+                         fabs(oldQty) * oldPrice +
+                         fabs(signedQty) * executionPrice
+                        )
+                        /
+                        fabs(newQty);
+                }
+                else if (newQty == 0.0)
+                {
+                    /*
+                     * Fully closed.
+                     */
+                    state->position.price = 0.0;
+                }
+
+                state->position.qty =
+                    newQty;
+
+                state->position.ltp =
+                    executionPrice;
+
+                /* realised pnl */
+                state->position.pnl = (signedQty * executionPrice) + (oldQty * oldPrice);
+                state->position.timestamp =
+                    order->timestamp;
             }
-            else if (newQty == 0.0)
-            {
-                /*
-                 * Fully closed.
-                 */
-                state->position.price = 0.0;
-            }
-
-            state->position.qty =
-                newQty;
-
-            state->position.ltp =
-                executionPrice;
-
-            /* realised pnl */
-            state->position.pnl = (signedQty * executionPrice) + (oldQty * oldPrice);
-            state->position.timestamp =
-                order->timestamp;
         }
         else if (
             strcmp(binanceStatus, "CANCELED") == 0 ||
@@ -726,11 +734,16 @@ UpdateOrderFromBinance(
         if (strcmp(binanceStatus, "NEW") == 0 ||
             strcmp(binanceStatus, "PARTIALLY_FILLED") == 0)
         {
-            order->status = PENDING;
+            if (order->status != COMPLETED)
+            {
+                order->status = PENDING;
+            }
         }
         else if (strcmp(binanceStatus, "FILLED") == 0)
         {
             printf("order filled\n");
+            if (order->status != COMPLETED)
+            {
             order->status = COMPLETED;
             yyjson_val *executedQtyVal =
                 yyjson_obj_get(result, "executedQty");
@@ -836,6 +849,7 @@ UpdateOrderFromBinance(
             state->position.pnl = (signedQty * executionPrice) + (oldQty * oldPrice);
             state->position.timestamp =
                 order->timestamp;
+            }
         }
         else if (strcmp(binanceStatus, "CANCELED") == 0 ||
                  strcmp(binanceStatus, "EXPIRED") == 0 ||
@@ -866,6 +880,178 @@ UpdateOrderFromBinance(
         "Received Binance response for unknown order %s",
         localOrderId
     );
+}
+
+
+void
+handleTradeSocketResponse(
+        struct per_session_data__minimal *pss,
+        char *buf,
+        size_t len)
+{
+    yyjson_doc *doc =
+        yyjson_read(buf, len, 0);
+
+    yyjson_val *root =
+        yyjson_doc_get_root(doc);
+
+    /*
+     * User Data Stream:
+     *
+     * {
+     *     "subscriptionId": 0,
+     *     "event": {
+     *         "e": "executionReport",
+     *         ...
+     *     }
+     * }
+     */
+    yyjson_val *event =
+        yyjson_obj_get(root, "event");
+
+    if (event)
+    {
+        yyjson_val *eventType =
+            yyjson_obj_get(event, "e");
+
+        if (eventType &&
+                strcmp(
+                    yyjson_get_str(eventType),
+                    "executionReport"
+                    ) == 0)
+        {
+            UpdateOrderFromUserData(
+                    pss->state,
+                    event
+                    );
+        }
+        else if (eventType &&
+                strcmp(yyjson_get_str(eventType),
+                    "outboundAccountPosition") == 0)
+        {
+            yyjson_val *balances =
+                yyjson_obj_get(event, "B");
+
+            if (balances && yyjson_is_arr(balances))
+            {
+                yyjson_val *balance;
+                size_t max;
+                size_t idx;
+
+                yyjson_arr_foreach(balances, idx, max, balance)
+                {
+                    yyjson_val *asset =
+                        yyjson_obj_get(balance, "a");
+
+                    yyjson_val *free =
+                        yyjson_obj_get(balance, "f");
+
+                    yyjson_val *locked =
+                        yyjson_obj_get(balance, "l");
+
+                    if (!asset || !free || !locked)
+                        continue;
+
+                    const char *assetName =
+                        yyjson_get_str(asset);
+
+                    const char *freeStr =
+                        yyjson_get_str(free);
+
+                    const char *lockedStr =
+                        yyjson_get_str(locked);
+
+                    if (!assetName || !freeStr || !lockedStr)
+                        continue;
+
+                    LogInfo(
+                            "BALANCE %s free=%s locked=%s\n",
+                            assetName,
+                            freeStr,
+                            lockedStr
+                           );
+
+                    if (strcmp(assetName, "SOL") == 0)
+                    {
+                        pss->state->balances->coinBalance->free = strtod(freeStr, NULL);
+                        pss->state->balances->coinBalance->lock = strtod(lockedStr, NULL);
+
+                        LogInfo(
+                                "SOL BALANCE: free=%f locked=%f total=%f\n",
+                                pss->state->balances->coinBalance->free,
+                                pss->state->balances->coinBalance->lock,
+                                pss->state->balances->coinBalance->free +
+                                pss->state->balances->coinBalance->lock
+                               );
+                    }
+                    else if (strcmp(assetName, "USDT") == 0)
+                    {
+                        pss->state->balances->usdtBalance->free = strtod(freeStr, NULL);
+                        pss->state->balances->usdtBalance->lock = strtod(lockedStr, NULL);
+
+                        LogInfo(
+                                "USDT BALANCE: free=%f locked=%f total=%f\n",
+                                pss->state->balances->usdtBalance->free,
+                                pss->state->balances->usdtBalance->lock,
+                                pss->state->balances->usdtBalance->free +
+                                pss->state->balances->usdtBalance->lock
+                               );
+                    }
+                }
+            }
+
+        }
+    }
+    else
+    {
+        /*
+         * Normal WebSocket API response:
+         *
+         * {
+         *     "id": "...",
+         *     "status": 200,
+         *     "result": {...}
+         * }
+         */
+        yyjson_val *rpcStatus =
+            yyjson_obj_get(root, "status");
+
+        yyjson_val *result =
+            yyjson_obj_get(root, "result");
+
+        if (rpcStatus && result &&
+                yyjson_get_int(rpcStatus) == 200)
+        {
+            UpdateOrderFromBinance(
+                    pss->state,
+                    result
+                    );
+        }
+        else
+        {
+            yyjson_val *reqId =
+                yyjson_obj_get(root, "id");
+            char reqIdStr[100];
+            strcpy(reqIdStr, yyjson_get_str(reqId));
+            for (int i = 0; i < MAX_ORDERS; i++)
+            {
+                Order *order = &pss->state->orders[i];
+                if (strcmp(order->reqId, reqIdStr) == 0)
+                {
+                    order->status = REJECTED;
+                    LogInfo(
+                            "Order %s -> %s",
+                            order->id,
+                            "REJECTED" 
+                           );
+                    break;
+                }
+            }
+        }
+    } 
+
+    yyjson_doc_free(doc);
+
 }
 
 static int
@@ -1027,7 +1213,7 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
             {
                 Assert(len <= 4096);
 
-                char buf[4096];
+                char buf[4096 * 10];
 
                 memcpy(buf, in, len);
                 buf[len] = '\0';
@@ -1040,168 +1226,27 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                 if (!doc)
                 {
                     LogError("Couldn't parse Binance trade response");
-                    break;
-                }
-                yyjson_val *root =
-                    yyjson_doc_get_root(doc);
-
-                /*
-     * User Data Stream:
-     *
-     * {
-     *     "subscriptionId": 0,
-     *     "event": {
-     *         "e": "executionReport",
-     *         ...
-     *     }
-     * }
-     */
-                yyjson_val *event =
-                    yyjson_obj_get(root, "event");
-
-                if (event)
-                {
-                    yyjson_val *eventType =
-                        yyjson_obj_get(event, "e");
-
-                    if (eventType &&
-                        strcmp(
-                            yyjson_get_str(eventType),
-                            "executionReport"
-                        ) == 0)
-                    {
-                        UpdateOrderFromUserData(
-                            pss->state,
-                            event
-                        );
-                    }
-                    else if (eventType &&
-                             strcmp(yyjson_get_str(eventType),
-                                    "outboundAccountPosition") == 0)
-                    {
-                        yyjson_val *balances =
-                            yyjson_obj_get(event, "B");
-
-                        if (balances && yyjson_is_arr(balances))
-                        {
-                            yyjson_val *balance;
-                            size_t max;
-                            size_t idx;
-
-                            yyjson_arr_foreach(balances, idx, max, balance)
-                            {
-                                yyjson_val *asset =
-                                    yyjson_obj_get(balance, "a");
-
-                                yyjson_val *free =
-                                    yyjson_obj_get(balance, "f");
-
-                                yyjson_val *locked =
-                                    yyjson_obj_get(balance, "l");
-
-                                if (!asset || !free || !locked)
-                                    continue;
-
-                                const char *assetName =
-                                    yyjson_get_str(asset);
-
-                                const char *freeStr =
-                                    yyjson_get_str(free);
-
-                                const char *lockedStr =
-                                    yyjson_get_str(locked);
-
-                                if (!assetName || !freeStr || !lockedStr)
-                                    continue;
-
-                                LogInfo(
-                                    "BALANCE %s free=%s locked=%s\n",
-                                    assetName,
-                                    freeStr,
-                                    lockedStr
-                                );
-
-                                if (strcmp(assetName, "SOL") == 0)
-                                {
-                                    pss->state->balances->coinBalance->free = strtod(freeStr, NULL);
-                                    pss->state->balances->coinBalance->lock = strtod(lockedStr, NULL);
-
-                                    LogInfo(
-                                        "SOL BALANCE: free=%f locked=%f total=%f\n",
-                                        pss->state->balances->coinBalance->free,
-                                        pss->state->balances->coinBalance->lock,
-                                        pss->state->balances->coinBalance->free +
-                                        pss->state->balances->coinBalance->lock
-                                    );
-                                }
-                                else if (strcmp(assetName, "USDT") == 0)
-                                {
-                                    pss->state->balances->usdtBalance->free = strtod(freeStr, NULL);
-                                    pss->state->balances->usdtBalance->lock = strtod(lockedStr, NULL);
-
-                                    LogInfo(
-                                        "USDT BALANCE: free=%f locked=%f total=%f\n",
-                                        pss->state->balances->usdtBalance->free,
-                                        pss->state->balances->usdtBalance->lock,
-                                        pss->state->balances->usdtBalance->free +
-                                        pss->state->balances->usdtBalance->lock
-                                    );
-                                }
-                            }
-                        }
-
-                    }
+                    StringCat(pss->state->tradeEvent, buf);
+                    yyjson_doc_free(doc);
                 }
                 else
-            {
-                    /*
-         * Normal WebSocket API response:
-         *
-         * {
-         *     "id": "...",
-         *     "status": 200,
-         *     "result": {...}
-         * }
-         */
-                    yyjson_val *rpcStatus =
-                        yyjson_obj_get(root, "status");
+                {
+                    handleTradeSocketResponse(pss, buf, len);
+                    yyjson_doc_free(doc);
+                }
 
-                    yyjson_val *result =
-                        yyjson_obj_get(root, "result");
-
-                    if (rpcStatus && result &&
-                        yyjson_get_int(rpcStatus) == 200)
-                    {
-                        UpdateOrderFromBinance(
-                            pss->state,
-                            result
-                        );
-                    }
-                    else
-                    {
-                        yyjson_val *reqId =
-                            yyjson_obj_get(root, "id");
-                            char reqIdStr[100];
-                            strcpy(reqIdStr, yyjson_get_str(reqId));
-                            for (int i = 0; i < MAX_ORDERS; i++)
-                            {
-                                Order *order = &pss->state->orders[i];
-                                if (strcmp(order->reqId, reqIdStr) == 0)
-                                {
-                                    order->status = REJECTED;
-                                    LogInfo(
-                                            "Order %s -> %s",
-                                            order->id,
-                                            "REJECTED" 
-                                           );
-                                    break;
-                                }
-                            }
-                    }
-            } 
-
+                doc = yyjson_read(pss->state->tradeEvent,
+                        StringLength(pss->state->tradeEvent),
+                        0);
+                if (doc)
+                {
+                    LogInfo("NOT null anymore %s\n", pss->state->tradeEvent);
+                    handleTradeSocketResponse(pss,
+                            pss->state->tradeEvent,
+                            StringLength(pss->state->tradeEvent));
+                    memset(pss->state->tradeEvent, 0, sizeof(pss->state->tradeEvent));
+                }
                 yyjson_doc_free(doc);
-
                 break;
             } 
 
@@ -1972,7 +2017,7 @@ write_data(void *buffer, size_t size, size_t nmemb, void *userp)
     snapshot->size = realsize;
     snapshot->resp[snapshot->size] = 0;
 
-    LogInfo("in write call back, size is %zu, resp is %s\n", realsize, snapshot->resp);
+    // LogInfo("in write call back, size is %zu, resp is %s\n", realsize, snapshot->resp);
     return realsize;
 }
 
@@ -2040,11 +2085,11 @@ IgnoreAndApplyEvents(State *state)
         Market_event event = MarketEventsBuffer->buffer[i];
         uint64 firstId = event.U; 
         uint64 lastId = event.u; 
-        LogInfo("Compare: lastId %lu , firstId %lu, and lastUpdateId %lu\n",
-               lastId, firstId, lastUpdateId);
+        // LogInfo("Compare: lastId %lu , firstId %lu, and lastUpdateId %lu\n",
+               // lastId, firstId, lastUpdateId);
         if (lastId <= lastUpdateId)
         {
-            LogInfo("Continuing\n");
+            // LogInfo("Continuing\n");
             continue; // Ignore.
         }
         else if ((firstId - lastUpdateId) == 1)
@@ -2463,15 +2508,13 @@ main()
     state.SL = 0.04;
 
     Balance usdtBalance = {};
-    usdtBalance.lock = 0;
-    usdtBalance.free = 0;
     Balance coinBalance = {};
-    coinBalance.lock = 0;
-    coinBalance.free = 0;
 
     Balances balances = {};
     balances.usdtBalance = &usdtBalance;
+    usdtBalance.free = 181.59;
     balances.coinBalance = &coinBalance;
+    coinBalance.free = 0.000;
     state.balances = &balances;
     // lws_set_log_level(
     //     LLL_ERR |
@@ -2686,13 +2729,14 @@ main()
                 strcpy(buyOrder.coin, "SOLUSDT");
                 buyOrder.side = BUY;
                 buyOrder.type = LIMIT;
-                buyOrder.qty = 0.15;
+                buyOrder.qty = fmin(0.15,
+                        state.balances->usdtBalance->free);
                 // buyOrder.price = state.OrderBook.bids[SPREAD_LEVEL].price; 
                 buyOrder.status = PENDING; 
                 strcpy(sellOrder.coin, "SOLUSDT");
                 sellOrder.side = SELL;
                 sellOrder.type = LIMIT;
-                sellOrder.qty = 0.15;
+                sellOrder.qty = fmin(0.15, state.balances->coinBalance->free);
                 // sellOrder.price = state.OrderBook.asks[SPREAD_LEVEL].price;
                 sellOrder.status = PENDING; 
                 char uuidStr[37];
@@ -2743,7 +2787,11 @@ main()
                 closeOrder.timestamp = XgetTimestamp();
                 closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
                 closeOrder.type = MARKET;
-                closeOrder.qty = fabs(state.position.qty);
+                closeOrder.qty = (state.position.qty > 0) ?
+                    fabs(fmin(state.position.qty,
+                                state.balances->coinBalance->free)) :
+                    fabs(fmin(state.position.qty,
+                                state.balances->usdtBalance->free));
                 closeOrder.status = PENDING;
                 strcpy(closeOrder.coin, state.position.symbol);
                 char uuidStr[37];
@@ -2775,7 +2823,11 @@ main()
                 closeOrder.timestamp = XgetTimestamp();
                 closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
                 closeOrder.type = LIMIT;
-                closeOrder.qty =fabs(state.position.qty); 
+                closeOrder.qty = (state.position.qty > 0) ?
+                    fabs(fmin(state.position.qty,
+                                state.balances->coinBalance->free)) :
+                    fabs(fmin(state.position.qty,
+                                state.balances->usdtBalance->free));
                 closeOrder.price = (state.position.qty > 0) ?
                     sellPrice : buyPrice;
                 closeOrder.status = PENDING;
