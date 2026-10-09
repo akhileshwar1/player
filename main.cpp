@@ -31,7 +31,7 @@
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */ 
 #define SPREAD_PCT 0.3 /* spread . */ 
 #define STEP_SIZE 0.001
-#define POSITION_EPSILON 0.1
+#define POSITION_EPSILON 0.13
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
@@ -1371,17 +1371,17 @@ BufferEvent(Market_event marketEvent, Market_events_buffer *marketEventsBuffer)
     {
         marketEventsBuffer->currentWriteIndex = currentWriteIndex % size;
     }
-    LogInfo(
-        "MEB=%p buffer=%p size=%u write=%u",
-        (void *)marketEventsBuffer,
-        (void *)marketEventsBuffer->buffer,
-        marketEventsBuffer->size,
-        marketEventsBuffer->currentWriteIndex
-    );
-    marketEventsBuffer->buffer[marketEventsBuffer->currentWriteIndex] = marketEvent;
-    LogInfo("Buffered event U %lu at index %u\n",
-           marketEvent.U,
-           marketEventsBuffer->currentWriteIndex);
+    // LogInfo(
+    //     "MEB=%p buffer=%p size=%u write=%u",
+    //     (void *)marketEventsBuffer,
+    //     (void *)marketEventsBuffer->buffer,
+    //     marketEventsBuffer->size,
+    //     marketEventsBuffer->currentWriteIndex
+    // );
+    // marketEventsBuffer->buffer[marketEventsBuffer->currentWriteIndex] = marketEvent;
+    // LogInfo("Buffered event U %lu at index %u\n",
+    //        marketEvent.U,
+    //        marketEventsBuffer->currentWriteIndex);
     marketEventsBuffer->currentWriteIndex++;
     marketEventsBuffer->eventCount++;
 }
@@ -1397,8 +1397,8 @@ BufferTradeEvent(Trade_event tradeEvent, Trade_events_buffer *tradeEventsBuffer)
         tradeEventsBuffer->currentWriteIndex = currentWriteIndex % size;
     }
     tradeEventsBuffer->buffer[tradeEventsBuffer->currentWriteIndex] = tradeEvent;
-    LogInfo("Buffered event at index %u\n",
-           tradeEventsBuffer->currentWriteIndex);
+    // LogInfo("Buffered event at index %u\n",
+    //        tradeEventsBuffer->currentWriteIndex);
     tradeEventsBuffer->currentWriteIndex++;
     tradeEventsBuffer->eventCount++;
 }
@@ -2033,7 +2033,7 @@ SetOrderBook(State *state)
     yyjson_val *root = yyjson_doc_get_root(doc);
     yyjson_val *id = yyjson_obj_get(root, "lastUpdateId");
     uint64 lastUpdateId = (uint64)yyjson_get_int(id);
-    LogInfo("Last update id is %lu\n", lastUpdateId);
+    // LogInfo("Last update id is %lu\n", lastUpdateId);
     OrderBook->lastUpdateId = lastUpdateId;
 
     yyjson_val *bids = yyjson_obj_get(root, "bids");
@@ -2512,9 +2512,9 @@ main()
 
     Balances balances = {};
     balances.usdtBalance = &usdtBalance;
-    usdtBalance.free = 181.59;
+    usdtBalance.free = 149.63;
     balances.coinBalance = &coinBalance;
-    coinBalance.free = 0.000;
+    coinBalance.free = 0.266;
     state.balances = &balances;
     // lws_set_log_level(
     //     LLL_ERR |
@@ -2609,7 +2609,7 @@ main()
     {
         if (state.MarketEventsBuffer.currentWriteIndex > 0 &&
             !state.isSnapshot) {
-            LogInfo("Checking for snapshot...\n");
+            // LogInfo("Checking for snapshot...\n");
             curl_easy_setopt(curl, CURLOPT_URL, SNAPSHOT_URL);
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&state.snapshot);
@@ -2627,15 +2627,15 @@ main()
             yyjson_val *root = yyjson_doc_get_root(doc);
             yyjson_val *id = yyjson_obj_get(root, "lastUpdateId");
             uint64 lastUpdateId = (uint64)yyjson_get_int(id);
-            LogInfo("Last update id is %lu\n", lastUpdateId);
+            // LogInfo("Last update id is %lu\n", lastUpdateId);
             Market_event firstEvent = state.MarketEventsBuffer.buffer[0];
             LogInfo("first update id is %lu\n", firstEvent.U);
-            LogInfo("Compare: lastUpdateId %lu with first event id %lu\n",
-                   lastUpdateId, firstEvent.U);
-            LogInfo("current Write inDex is %u\n",
-                   state.MarketEventsBuffer.currentWriteIndex);
+            // LogInfo("Compare: lastUpdateId %lu with first event id %lu\n",
+                   // lastUpdateId, firstEvent.U);
+            // LogInfo("current Write inDex is %u\n",
+                   // state.MarketEventsBuffer.currentWriteIndex);
             if (lastUpdateId > firstEvent.U) {
-                LogInfo("LastUpdateId %lu > the first buffered event id!", lastUpdateId);
+                // LogInfo("LastUpdateId %lu > the first buffered event id!", lastUpdateId);
                 state.isSnapshot = true;
             }
             // curl_easy_cleanup(curl);
@@ -2645,7 +2645,7 @@ main()
                  !state.AreEventsApplied)
         {
             SetOrderBook(&state);
-            LogInfo("Order book id is %lu\n", state.OrderBook.lastUpdateId);
+            // LogInfo("Order book id is %lu\n", state.OrderBook.lastUpdateId);
             // discard/ignore the buffered events where the id < snapshot id
             // apply the buffered events to the order book
             IgnoreAndApplyEvents(&state);
