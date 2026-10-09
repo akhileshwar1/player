@@ -2447,6 +2447,19 @@ putOrderInState(State *state, Order order)
     return -1;
 }
 
+bool
+allOrdersCanceled(State *state)
+{
+    for (int i = 0; i < MAX_ORDERS; i++)
+    {
+        if (0 != strcmp(state->orders[i].id, ""))
+        {
+            if (state->orders[i].status == PENDING)
+                return false;
+        }
+    }
+    return true;
+}
 
 int
 main()
@@ -2505,16 +2518,16 @@ main()
     clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
     state.lastTime = endTime;
     state.currOrderIndex = -1;
-    state.SL = 0.04;
+    state.SL = 0.01;
 
     Balance usdtBalance = {};
     Balance coinBalance = {};
 
     Balances balances = {};
     balances.usdtBalance = &usdtBalance;
-    usdtBalance.free = 149.63;
+    usdtBalance.free = 161.55;
     balances.coinBalance = &coinBalance;
-    coinBalance.free = 0.266;
+    coinBalance.free = 0.150;
     state.balances = &balances;
     // lws_set_log_level(
     //     LLL_ERR |
@@ -2714,53 +2727,57 @@ main()
                 state.lastTime = endTime;
                 LogInfo("TIME ELAPSED=====\n");
                 cancelAllOrders(&state, &tradeChannel);
-                // createNewPair(state.orders);
-                real64 mid =
-                    (state.OrderBook.bids[0].price +
-                    state.OrderBook.asks[0].price) / 2.0; 
-                LogInfo("Mid is %f\n", mid);
-                Order buyOrder = {};
-                Order sellOrder = {};
-                buyOrder.price  = mid * (1 - (SPREAD_PCT / (2 * 100)));
-                sellOrder.price = mid * (1 + (SPREAD_PCT / (2 * 100)));
-                LogInfo("buy and sell price are %f , %f\n", buyOrder.price, sellOrder.price);
-                buyOrder.timestamp = XgetTimestamp();
-                sellOrder.timestamp = XgetTimestamp();
-                strcpy(buyOrder.coin, "SOLUSDT");
-                buyOrder.side = BUY;
-                buyOrder.type = LIMIT;
-                buyOrder.qty = fmin(0.15,
-                        state.balances->usdtBalance->free);
-                // buyOrder.price = state.OrderBook.bids[SPREAD_LEVEL].price; 
-                buyOrder.status = PENDING; 
-                strcpy(sellOrder.coin, "SOLUSDT");
-                sellOrder.side = SELL;
-                sellOrder.type = LIMIT;
-                sellOrder.qty = fmin(0.15, state.balances->coinBalance->free);
-                // sellOrder.price = state.OrderBook.asks[SPREAD_LEVEL].price;
-                sellOrder.status = PENDING; 
-                char uuidStr[37];
-                generateUUID(uuidStr);
-                strcpy(buyOrder.id, uuidStr);
-                generateUUID(uuidStr);
-                strcpy(sellOrder.id, uuidStr);
-                generateUUID(uuidStr);
-                strcpy(buyOrder.reqId, uuidStr);
-                generateUUID(uuidStr);
-                strcpy(sellOrder.reqId, uuidStr);
-                int res = putOrderInState(&state, buyOrder);
-                if (res >= 0)
+                if (allOrdersCanceled(&state))
                 {
-                    /* assuming orders will be cancelled and we will have 
-                     * slots to fill in state.orders */
-                    int res = sendOrder(&buyOrder, &tradeChannel);
-                }
-                res = putOrderInState(&state, sellOrder);
-                if (res >= 0)
-                {
-                    /* assuming orders will be cancelled and we will have 
-                     * slots to fill in state.orders */
-                    int res = sendOrder(&sellOrder, &tradeChannel);
+
+                    // createNewPair(state.orders);
+                    real64 mid =
+                        (state.OrderBook.bids[0].price +
+                         state.OrderBook.asks[0].price) / 2.0; 
+                    LogInfo("Mid is %f\n", mid);
+                    Order buyOrder = {};
+                    Order sellOrder = {};
+                    buyOrder.price  = mid * (1 - (SPREAD_PCT / (2 * 100)));
+                    sellOrder.price = mid * (1 + (SPREAD_PCT / (2 * 100)));
+                    LogInfo("buy and sell price are %f , %f\n", buyOrder.price, sellOrder.price);
+                    buyOrder.timestamp = XgetTimestamp();
+                    sellOrder.timestamp = XgetTimestamp();
+                    strcpy(buyOrder.coin, "SOLUSDT");
+                    buyOrder.side = BUY;
+                    buyOrder.type = LIMIT;
+                    buyOrder.qty = fmin(0.15,
+                            state.balances->usdtBalance->free);
+                    // buyOrder.price = state.OrderBook.bids[SPREAD_LEVEL].price; 
+                    buyOrder.status = PENDING; 
+                    strcpy(sellOrder.coin, "SOLUSDT");
+                    sellOrder.side = SELL;
+                    sellOrder.type = LIMIT;
+                    sellOrder.qty = fmin(0.15, state.balances->coinBalance->free);
+                    // sellOrder.price = state.OrderBook.asks[SPREAD_LEVEL].price;
+                    sellOrder.status = PENDING; 
+                    char uuidStr[37];
+                    generateUUID(uuidStr);
+                    strcpy(buyOrder.id, uuidStr);
+                    generateUUID(uuidStr);
+                    strcpy(sellOrder.id, uuidStr);
+                    generateUUID(uuidStr);
+                    strcpy(buyOrder.reqId, uuidStr);
+                    generateUUID(uuidStr);
+                    strcpy(sellOrder.reqId, uuidStr);
+                    int res = putOrderInState(&state, buyOrder);
+                    if (res >= 0)
+                    {
+                        /* assuming orders will be cancelled and we will have 
+                         * slots to fill in state.orders */
+                        int res = sendOrder(&buyOrder, &tradeChannel);
+                    }
+                    res = putOrderInState(&state, sellOrder);
+                    if (res >= 0)
+                    {
+                        /* assuming orders will be cancelled and we will have 
+                         * slots to fill in state.orders */
+                        int res = sendOrder(&sellOrder, &tradeChannel);
+                    }
                 }
             }
         }
@@ -2783,65 +2800,71 @@ main()
                 LogInfo("SL HIT ======\n");
                 /* close the position and cancel all orders */
                 cancelAllOrders(&state, &tradeChannel);
-                Order closeOrder = {};
-                closeOrder.timestamp = XgetTimestamp();
-                closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
-                closeOrder.type = MARKET;
-                closeOrder.qty = (state.position.qty > 0) ?
-                    fabs(fmin(state.position.qty,
-                                state.balances->coinBalance->free)) :
-                    fabs(fmin(state.position.qty,
-                                state.balances->usdtBalance->free));
-                closeOrder.status = PENDING;
-                strcpy(closeOrder.coin, state.position.symbol);
-                char uuidStr[37];
-                generateUUID(uuidStr);
-                strcpy(closeOrder.id, uuidStr);
-                generateUUID(uuidStr);
-                strcpy(closeOrder.reqId, uuidStr);
-                int res = putOrderInState(&state, closeOrder);
-                if (res >= 0)
+                if (allOrdersCanceled(&state))
                 {
-                    int res = sendOrder(&closeOrder, &tradeChannel);
-                    if (res < 0) LogInfo("couldn't close order \n");
+                    Order closeOrder = {};
+                    closeOrder.timestamp = XgetTimestamp();
+                    closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
+                    closeOrder.type = MARKET;
+                    closeOrder.qty = (state.position.qty > 0) ?
+                        fabs(fmin(state.position.qty,
+                                    state.balances->coinBalance->free)) :
+                        fabs(fmin(state.position.qty,
+                                    state.balances->usdtBalance->free));
+                    closeOrder.status = PENDING;
+                    strcpy(closeOrder.coin, state.position.symbol);
+                    char uuidStr[37];
+                    generateUUID(uuidStr);
+                    strcpy(closeOrder.id, uuidStr);
+                    generateUUID(uuidStr);
+                    strcpy(closeOrder.reqId, uuidStr);
+                    int res = putOrderInState(&state, closeOrder);
+                    if (res >= 0)
+                    {
+                        int res = sendOrder(&closeOrder, &tradeChannel);
+                        if (res < 0) LogInfo("couldn't close order \n");
+                    }
+                    /*TODO(Akhil): this is a fix, i just want it to start quoting again */
+                    // state.position.qty = 0;
                 }
-                /*TODO(Akhil): this is a fix, i just want it to start quoting again */
-                // state.position.qty = 0;
             }
             else if (timeElapsedMS >= MIN_REFRESH_TIME)
             {
                 state.lastTimeExitRefresh = endTime;
                 LogInfo("TIME ELAPSED=====\n");
                 cancelAllOrders(&state, &tradeChannel);
-                /* refresh the close order */
-                real64 mid = state.position.price;
-                LogInfo("Mid is %f\n", mid);
-                real64 buyPrice  = mid * (1 - (SPREAD_PCT / (1 * 100)));
-                real64 sellPrice = mid * (1 + (SPREAD_PCT / (1 * 100)));
-                LogInfo("buy and sell price are %f , %f\n", buyPrice, sellPrice);
-                Order closeOrder = {};
-                closeOrder.timestamp = XgetTimestamp();
-                closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
-                closeOrder.type = LIMIT;
-                closeOrder.qty = (state.position.qty > 0) ?
-                    fabs(fmin(state.position.qty,
-                                state.balances->coinBalance->free)) :
-                    fabs(fmin(state.position.qty,
-                                state.balances->usdtBalance->free));
-                closeOrder.price = (state.position.qty > 0) ?
-                    sellPrice : buyPrice;
-                closeOrder.status = PENDING;
-                strcpy(closeOrder.coin, state.position.symbol);
-                char uuidStr[37];
-                generateUUID(uuidStr);
-                strcpy(closeOrder.id, uuidStr);
-                generateUUID(uuidStr);
-                strcpy(closeOrder.reqId, uuidStr);
-                int res = putOrderInState(&state, closeOrder);
-                if (res >= 0)
+                if (allOrdersCanceled(&state))
                 {
-                    int res = sendOrder(&closeOrder, &tradeChannel);
-                    if (res < 0) LogInfo("couldn't close order \n");
+                    /* refresh the close order */
+                    real64 mid = state.position.price;
+                    LogInfo("Mid is %f\n", mid);
+                    real64 buyPrice  = mid * (1 - (SPREAD_PCT / (1 * 100)));
+                    real64 sellPrice = mid * (1 + (SPREAD_PCT / (1 * 100)));
+                    LogInfo("buy and sell price are %f , %f\n", buyPrice, sellPrice);
+                    Order closeOrder = {};
+                    closeOrder.timestamp = XgetTimestamp();
+                    closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
+                    closeOrder.type = LIMIT;
+                    closeOrder.qty = (state.position.qty > 0) ?
+                        fabs(fmin(state.position.qty,
+                                    state.balances->coinBalance->free)) :
+                        fabs(fmin(state.position.qty,
+                                    state.balances->usdtBalance->free));
+                    closeOrder.price = (state.position.qty > 0) ?
+                        sellPrice : buyPrice;
+                    closeOrder.status = PENDING;
+                    strcpy(closeOrder.coin, state.position.symbol);
+                    char uuidStr[37];
+                    generateUUID(uuidStr);
+                    strcpy(closeOrder.id, uuidStr);
+                    generateUUID(uuidStr);
+                    strcpy(closeOrder.reqId, uuidStr);
+                    int res = putOrderInState(&state, closeOrder);
+                    if (res >= 0)
+                    {
+                        int res = sendOrder(&closeOrder, &tradeChannel);
+                        if (res < 0) LogInfo("couldn't close order \n");
+                    }
                 }
             }
         }
