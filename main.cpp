@@ -29,7 +29,7 @@
 #define MIN_REFRESH_TIME 5000 
 #define MAX_ORDERS 10 
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */ 
-#define SPREAD_PCT 0.3 /* spread . */ 
+#define SPREAD_PCT 0.5 /* spread . */ 
 #define STEP_SIZE 0.001
 #define POSITION_EPSILON 0.13
 
@@ -2518,7 +2518,7 @@ main()
     clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
     state.lastTime = endTime;
     state.currOrderIndex = -1;
-    state.SL = 0.01;
+    state.SL = 0.001;
 
     Balance usdtBalance = {};
     Balance coinBalance = {};
