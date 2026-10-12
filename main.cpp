@@ -2525,9 +2525,9 @@ main()
 
     Balances balances = {};
     balances.usdtBalance = &usdtBalance;
-    usdtBalance.free = 161.55;
+    usdtBalance.free = 156.32;
     balances.coinBalance = &coinBalance;
-    coinBalance.free = 0.150;
+    coinBalance.free = 0.191;
     state.balances = &balances;
     // lws_set_log_level(
     //     LLL_ERR |
