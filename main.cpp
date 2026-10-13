@@ -30,6 +30,7 @@
 #define MAX_ORDERS 10 
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */ 
 #define SPREAD_PCT 0.5 /* spread . */ 
+#define STOP_LOSS_PCT 0.1 /* stop loss . */ 
 #define STEP_SIZE 0.001
 #define POSITION_EPSILON 0.13
 
@@ -51,7 +52,8 @@ typedef struct
     real64 price;
     real64 ltp;
     real64 qty;
-    real64 pnl;
+    real64 upnl;
+    real64 rpnl;
     uint64 timestamp;
 } Position;
 
@@ -616,7 +618,7 @@ UpdateOrderFromUserData(
                     executionPrice;
 
                 /* realised pnl */
-                state->position.pnl = (signedQty * executionPrice) + (oldQty * oldPrice);
+                state->position.rpnl = (signedQty * executionPrice) + (oldQty * oldPrice);
                 state->position.timestamp =
                     order->timestamp;
             }
@@ -846,7 +848,7 @@ UpdateOrderFromBinance(
                 executionPrice;
 
             /* realised pnl */
-            state->position.pnl = (signedQty * executionPrice) + (oldQty * oldPrice);
+            state->position.rpnl = (signedQty * executionPrice) + (oldQty * oldPrice);
             state->position.timestamp =
                 order->timestamp;
             }
@@ -2365,7 +2367,7 @@ DashboardRender(
         printf("Quantity     : %.4f\n", position->qty);
         printf("Entry Price  : %.4f\n", position->price);
         printf("LTP          : %.4f\n", position->ltp);
-        printf("PnL          : %.4f\n", position->pnl);
+        printf("UPnL          : %.4f\n", position->upnl);
         printf("Last updated :  %s\n", timeStr);
     }
 
@@ -2518,16 +2520,16 @@ main()
     clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
     state.lastTime = endTime;
     state.currOrderIndex = -1;
-    state.SL = 0.001;
+    state.SL = STOP_LOSS_PCT;
 
     Balance usdtBalance = {};
     Balance coinBalance = {};
 
     Balances balances = {};
     balances.usdtBalance = &usdtBalance;
-    usdtBalance.free = 156.32;
+    usdtBalance.free = 145.41;
     balances.coinBalance = &coinBalance;
-    coinBalance.free = 0.191;
+    coinBalance.free = 0.289;
     state.balances = &balances;
     // lws_set_log_level(
     //     LLL_ERR |
@@ -2642,7 +2644,7 @@ main()
             uint64 lastUpdateId = (uint64)yyjson_get_int(id);
             // LogInfo("Last update id is %lu\n", lastUpdateId);
             Market_event firstEvent = state.MarketEventsBuffer.buffer[0];
-            LogInfo("first update id is %lu\n", firstEvent.U);
+            // LogInfo("first update id is %lu\n", firstEvent.U);
             // LogInfo("Compare: lastUpdateId %lu with first event id %lu\n",
                    // lastUpdateId, firstEvent.U);
             // LogInfo("current Write inDex is %u\n",
@@ -2789,13 +2791,15 @@ main()
             quote bestQ = getBestQuote(&state.OrderBook);
             real64 ltp = bestQ.price;
             state.position.ltp = ltp;
-            state.position.pnl = (ltp - state.position.price) * state.position.qty;
+            state.position.upnl = (ltp - state.position.price) * state.position.qty;
             real64 timeElapsedMS = XtimeElapsedMS(
                 state.lastTimeExitRefresh,
                 endTime
             );
             LogInfo("time elapsed is %f=====\n", timeElapsedMS);
-            if (state.position.pnl < 0 && fabs(state.position.pnl) >= state.SL)
+            if (state.position.upnl < 0 &&
+                    fabs(state.position.upnl) >=
+                    (state.position.price * state.position.qty * (state.SL / 100)))
             {
                 LogInfo("SL HIT ======\n");
                 /* close the position and cancel all orders */
