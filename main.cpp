@@ -182,17 +182,21 @@ typedef struct
 {
     char symbol[100];
     Balance balance;
+    struct lws *lws;
+    Snapshot snapshot;
+    Market_events_buffer MarketEventsBuffer;
+    bool isSnapshot;
+    bool AreEventsApplied;
+    Order_book OrderBook;
+    char event[4096 * 10];
+    real64 startPrice;
+    timespec lastTime;
 } Coin_state;
 
 typedef struct
 {
-    char event[4096 * 10];
     char tradeEvent[4096 * 10];
-    Market_events_buffer MarketEventsBuffer;
     Trade_events_buffer TradeEventsBuffer;
-    Snapshot snapshot;
-    Order_book OrderBook;
-    real64 startPrice;
     real64 startPriceParent;
     real64 timeToClose;
     real64 timeToRefresh;
@@ -202,13 +206,10 @@ typedef struct
     real64 buyPressureParent;
     real64 sellPressureParent;
     real64 SL; /* stop loss in absolute value */
-    timespec lastTime;
     timespec lastTimeExitRefresh;
     timespec lastTimeDashboard;
     timespec lastTimeParent;
     bool isOpen;
-    bool AreEventsApplied;
-    bool isSnapshot;
     bool isPriceTaken;
     Posn_type posnType; 
     Position position;
@@ -245,6 +246,17 @@ typedef struct
 
     struct per_session_data__minimal *pss;
 } TradeThreadArgs;
+
+typedef struct
+{
+    struct lws_context *context;
+    struct lws *wsi;
+
+    struct per_session_data__minimal *pss;
+    int index;
+    CURL *curl;
+} MainThreadArgs;
+
 
 static const char *
 SideString(Side side)
@@ -2036,7 +2048,7 @@ write_data(void *buffer, size_t size, size_t nmemb, void *userp)
 
 // NOTE(Akhil): why void? can't the load fail? json wrong?
 void
-SetOrderBook(State *state)
+SetOrderBook(Coin_state *state)
 {
     Order_book *OrderBook = &state->OrderBook;
     Snapshot *snapshot = &state->snapshot;
@@ -2084,7 +2096,7 @@ PrintTradeState(State *state)
 }
 
 void
-IgnoreAndApplyEvents(State *state)
+IgnoreAndApplyEvents(Coin_state *state)
 {
     Order_book *OrderBook = &state->OrderBook;
     Market_events_buffer *MarketEventsBuffer = &state->MarketEventsBuffer;
@@ -2473,214 +2485,51 @@ allOrdersCanceled(State *state)
     return true;
 }
 
-int
-main()
+static void *
+mainThread(void *arg)
 {
-    LogInit(LOG_INFO);
-    Channel tradeChannel;
-    ChannelInit(&tradeChannel);
-    CURLcode res = curl_global_init(CURL_GLOBAL_ALL);
-    if (res != CURLE_OK) {
-        LogInfo("curl setup failed, abort!");
-        return -1;
-    }
-
-    CURL *curl = curl_easy_init(); // Fresh handle
-    if (curl == NULL)
+    MainThreadArgs *args = (MainThreadArgs *)arg;
+    State *state = args->pss->state;
+    int index = args->index;
+    CURL *curl = args->curl;
+    while (1)
     {
-        LogError("curl_easy_init() returned NULL\n");
-        return -1;
-    }
-    setvbuf(stdout, NULL, _IONBF, 0);
-    setvbuf(stderr, NULL, _IONBF, 0);
-    
-    FILE *outputFile = fopen("outputLive.csv", "w");
-    setbuf(outputFile, NULL); // Disables buffering completely
-    if (outputFile == NULL)
-    {
-        LogInfo("Couldn't open file\n");
-        return -1;
-    }
-
-    fputs("id, Timestamp, symbol, side, price, qty, curr_value, usdt_after_fee, qty_after_fee, pnl\n", outputFile);
-    State state = {};
-    StringCpy(state.event, (char *)"");
-    state.isSnapshot = false;
-    state.isPriceTaken = false;
-    state.shouldPlaceOrder = false;
-    state.MarketEventsBuffer.size = MAX_EVENTS;
-    state.MarketEventsBuffer.currentWriteIndex = 0;
-    state.TradeEventsBuffer.size = MAX_EVENTS;
-    state.TradeEventsBuffer.currentWriteIndex = 0;
-    state.buyPressure = 0.0;
-    state.sellPressure = 0.0;
-    state.buyPressureParent = 0.0;
-    state.sellPressureParent = 0.0;
-    state.timeToRefresh = 4 * 60 * 60 * 1000;
-    state.timeToRefreshParent = 8 * 60 * 60 * 1000;
-    Position position = {};
-    position.symbol = (char *)"SOLUSDT";
-    Wallet wallet = {};
-    wallet.usdt = 71.62;
-    wallet.coin = 16.02;
-    state.wallet = wallet;
-    state.position = position;
-    state.outputFile = outputFile;
-    timespec endTime;
-    clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
-    state.lastTime = endTime;
-    state.currOrderIndex = -1;
-    state.SL = STOP_LOSS_PCT;
-
-    char symbols[MAX_COINS][100] = {"solusdt", "xrpusdt"};
-    real64 coinBalances[MAX_COINS] = {0.289, 0};
-
-    for (int i = 0; i < MAX_COINS; i++)
-    {
-        if (0 != strcmp(state.coinStates[i].symbol, ""))
-        {
-            StringCpy(state.coinStates[i].symbol, symbols[i]);
-            state.coinStates[i].balance.free = coinBalances[i];
-        }
-    }
-
-    Balance usdtBalance = {};
-    usdtBalance.free = 145.41;
-    state.usdtBalance = usdtBalance;
-    // lws_set_log_level(
-    //     LLL_ERR |
-    //     LLL_WARN |
-    //     LLL_NOTICE |
-    //     LLL_INFO |
-    //     LLL_DEBUG,
-    //     NULL
-    // );
-    // | LLL_DEBUG
-    // lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO, NULL); 
-    LogInfo("running\n");
-    char address[1024];
-    StringCpy(address, (char *)MARKET_BASE_ENDP);
-    StringCat(address, (char *)STREAM_PATH);
-    LogInfo("address is %s\n", address);
-    struct lws_context_creation_info info = {};
-    info.port = CONTEXT_PORT_NO_LISTEN;
-    info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT; // Crucial for SSL
-    info.protocols = protocols;
-    info.gid = -1;
-    info.uid = -1;
-    int port = 9443;
-
-    struct lws_context *context = lws_create_context(&info);
-    if (context == NULL)
-    {
-        LogInfo("Couldn't create context\n");
-        return -1;
-    }
-    /* connect the websocket to binance orderbook of all coins. */
-    for (int i = 0; i < MAX_COINS; i++)
-    {
-        if (0 != strcmp(state.coinStates[i].symbol, ""))
-        {
-            struct lws_client_connect_info ccinfo = {};
-            ccinfo.context = context;
-            ccinfo.address = MARKET_BASE_ENDP;
-            ccinfo.port = port;
-            // ccinfo.ssl_connection = 1;
-            char path[100];
-            sprintf(path, "ws/%s@depth", state.coinStates[i].symbol);
-            ccinfo.path = path;
-            ccinfo.host = ccinfo.address;
-            ccinfo.origin = ccinfo.address;
-            ccinfo.ssl_connection = LCCSCF_USE_SSL;
-            ccinfo.ietf_version_or_minus_one = -1;
-            ccinfo.protocol = "binance";
-            ccinfo.userdata = (void *)&state;
-            struct lws *lws = lws_client_connect_via_info(&ccinfo);
-            if (lws == NULL)
-            {
-                LogInfo("Connection failed\n");
-                return -1;
-            }
-        }
-    }
-    
-    /* connect the websocket to binance trade api*/
-    struct lws_client_connect_info ccinfoTrade = {};
-    ccinfoTrade.context = context;
-    ccinfoTrade.address = TRADE_BASE_ENDP;
-    ccinfoTrade.port = port;
-    ccinfoTrade.ssl_connection = 1;
-    ccinfoTrade.path = TRADE_PATH;
-    ccinfoTrade.host = ccinfoTrade.address;
-    ccinfoTrade.origin = ccinfoTrade.address;
-    ccinfoTrade.ssl_connection = LCCSCF_USE_SSL;
-    ccinfoTrade.ietf_version_or_minus_one = -1;
-    ccinfoTrade.protocol = "binance-trade";
-    struct per_session_data__minimal pss = {}; 
-    pss.state = &state;
-    pss.channel = &tradeChannel;
-    pss.buffer = NULL;
-    ccinfoTrade.userdata = (void *)&pss;
-    struct lws *lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
-    if (lwsTrade == NULL)
-    {
-        LogInfo("Connection failed\n");
-        return -1;
-    }
-    TradeThreadArgs tradeArgs = {
-        .channel = &tradeChannel,
-        .context = context,
-        .wsi = lwsTrade,
-        .pss = &pss
-    };
-
-    pthread_t tradeThreadId;
-
-    pthread_create(
-        &tradeThreadId,
-        NULL,
-        tradeThread,
-        &tradeArgs
-    ); 
-
-    while(1)
-    {
-        if (state.MarketEventsBuffer.currentWriteIndex > 0 &&
-            !state.isSnapshot) {
+        if (state->coinStates[index].MarketEventsBuffer.currentWriteIndex > 0 &&
+                !state->coinStates[index].isSnapshot) {
             // LogInfo("Checking for snapshot...\n");
             curl_easy_setopt(curl, CURLOPT_URL, SNAPSHOT_URL);
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&state.snapshot);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&state->coinStates[index].snapshot);
             CURLcode result = curl_easy_perform(curl);
             if (result != CURLE_OK) {
                 curl_easy_cleanup(curl);
-                free(state.snapshot.resp);
-                state.snapshot.resp = NULL;
-                state.snapshot.size = 0;
+                free(state->coinStates[index].snapshot.resp);
+                state->coinStates[index].snapshot.resp = NULL;
+                state->coinStates[index].snapshot.size = 0;
                 LogInfo("curl call failed!, %s abort!\n", curl_easy_strerror(result));
                 break;
             }
-            char *input = (char *)state.snapshot.resp;
+            char *input = (char *)state->coinStates[index].snapshot.resp;
             yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
             yyjson_val *root = yyjson_doc_get_root(doc);
             yyjson_val *id = yyjson_obj_get(root, "lastUpdateId");
             uint64 lastUpdateId = (uint64)yyjson_get_int(id);
             // LogInfo("Last update id is %lu\n", lastUpdateId);
-            Market_event firstEvent = state.MarketEventsBuffer.buffer[0];
+            Market_event firstEvent = state->coinStates[index].MarketEventsBuffer.buffer[0];
             // LogInfo("first update id is %lu\n", firstEvent.U);
             // LogInfo("Compare: lastUpdateId %lu with first event id %lu\n",
-                   // lastUpdateId, firstEvent.U);
+            // lastUpdateId, firstEvent.U);
             // LogInfo("current Write inDex is %u\n",
-                   // state.MarketEventsBuffer.currentWriteIndex);
+            // state.MarketEventsBuffer.currentWriteIndex);
             if (lastUpdateId > firstEvent.U) {
                 // LogInfo("LastUpdateId %lu > the first buffered event id!", lastUpdateId);
-                state.isSnapshot = true;
+                state->coinStates[index].isSnapshot = true;
             }
             // curl_easy_cleanup(curl);
             yyjson_doc_free(doc);
         }
-        else if (state.isSnapshot &&
-                 !state.AreEventsApplied)
+        else if (state->coinStates[index].isSnapshot &&
+                !state->coinStates[index].AreEventsApplied)
         {
             SetOrderBook(&state);
             // LogInfo("Order book id is %lu\n", state.OrderBook.lastUpdateId);
@@ -2723,17 +2572,17 @@ main()
         timespec endTime;
         clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
         real64 timeElapsedMS = XtimeElapsedMS(
-            state.lastTimeDashboard,
-            endTime
-        );
+                state.lastTimeDashboard,
+                endTime
+                );
         if (timeElapsedMS > 250)
         {
             state.lastTimeDashboard = endTime;
             DashboardRender(
-                &state.position,
-                state.orders,
-                state.currOrderIndex + 1
-            );
+                    &state.position,
+                    state.orders,
+                    state.currOrderIndex + 1
+                    );
         }
 
         LogInfo("state position qty is %f\n", state.position.qty);
@@ -2743,9 +2592,9 @@ main()
             /* check if refresh and
                create the pair of orders with the target spread. */
             real64 timeElapsedMS = XtimeElapsedMS(
-                state.lastTime,
-                endTime
-            );
+                    state.lastTime,
+                    endTime
+                    );
             // LogInfo("time elapsed is %f\n", timeElapsedMS);
             if (timeElapsedMS >= MIN_REFRESH_TIME)
             {
@@ -2816,9 +2665,9 @@ main()
             state.position.ltp = ltp;
             state.position.upnl = (ltp - state.position.price) * state.position.qty;
             real64 timeElapsedMS = XtimeElapsedMS(
-                state.lastTimeExitRefresh,
-                endTime
-            );
+                    state.lastTimeExitRefresh,
+                    endTime
+                    );
             LogInfo("time elapsed is %f=====\n", timeElapsedMS);
             if (state.position.upnl < 0 &&
                     fabs(state.position.upnl) >=
@@ -2895,15 +2744,202 @@ main()
                 }
             }
         }
-        //
-        // apply the event to the order book in the callback, if the OB is ready.
-        // lws_service(context, 0);
-        //
-        // PrintOrderBook(&state);
-        // PrintTradeState(&state);
+
+    }
+}
+
+
+int
+main()
+{
+    LogInit(LOG_INFO);
+    Channel tradeChannel;
+    ChannelInit(&tradeChannel);
+    CURLcode res = curl_global_init(CURL_GLOBAL_ALL);
+    if (res != CURLE_OK) {
+        LogInfo("curl setup failed, abort!");
+        return -1;
     }
 
-    curl_easy_cleanup(curl);
-    lws_context_destroy(context);
+    CURL *curl = curl_easy_init(); // Fresh handle
+    if (curl == NULL)
+    {
+        LogError("curl_easy_init() returned NULL\n");
+        return -1;
+    }
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    
+    FILE *outputFile = fopen("outputLive.csv", "w");
+    setbuf(outputFile, NULL); // Disables buffering completely
+    if (outputFile == NULL)
+    {
+        LogInfo("Couldn't open file\n");
+        return -1;
+    }
+
+    fputs("id, Timestamp, symbol, side, price, qty, curr_value, usdt_after_fee, qty_after_fee, pnl\n", outputFile);
+    State state = {};
+    StringCpy(state.event, (char *)"");
+    state.isSnapshot = false;
+    state.isPriceTaken = false;
+    state.shouldPlaceOrder = false;
+    state.MarketEventsBuffer.size = MAX_EVENTS;
+    state.MarketEventsBuffer.currentWriteIndex = 0;
+    state.TradeEventsBuffer.size = MAX_EVENTS;
+    state.TradeEventsBuffer.currentWriteIndex = 0;
+    state.buyPressure = 0.0;
+    state.sellPressure = 0.0;
+    state.buyPressureParent = 0.0;
+    state.sellPressureParent = 0.0;
+    state.timeToRefresh = 4 * 60 * 60 * 1000;
+    state.timeToRefreshParent = 8 * 60 * 60 * 1000;
+    Position position = {};
+    position.symbol = (char *)"SOLUSDT";
+    Wallet wallet = {};
+    wallet.usdt = 71.62;
+    wallet.coin = 16.02;
+    state.wallet = wallet;
+    state.position = position;
+    state.outputFile = outputFile;
+    timespec endTime;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
+    state.lastTime = endTime;
+    state.currOrderIndex = -1;
+    state.SL = STOP_LOSS_PCT;
+
+    char symbols[MAX_COINS][100] = {"solusdt", "xrpusdt"};
+    real64 coinBalances[MAX_COINS] = {0.289, 0};
+
+    for (int i = 0; i < MAX_COINS; i++)
+    {
+        if (0 != strcmp(state.coinStates[i].symbol, ""))
+        {
+            StringCpy(state.coinStates[i].symbol, symbols[i]);
+            state.coinStates[i].balance.free = coinBalances[i];
+            state.coinStates[i].isSnapshot = false;
+        }
+    }
+
+    Balance usdtBalance = {};
+    usdtBalance.free = 145.41;
+    state.usdtBalance = usdtBalance;
+    // lws_set_log_level(
+    //     LLL_ERR |
+    //     LLL_WARN |
+    //     LLL_NOTICE |
+    //     LLL_INFO |
+    //     LLL_DEBUG,
+    //     NULL
+    // );
+    // | LLL_DEBUG
+    // lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO, NULL); 
+    LogInfo("running\n");
+    char address[1024];
+    StringCpy(address, (char *)MARKET_BASE_ENDP);
+    StringCat(address, (char *)STREAM_PATH);
+    LogInfo("address is %s\n", address);
+    struct lws_context_creation_info info = {};
+    info.port = CONTEXT_PORT_NO_LISTEN;
+    info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT; // Crucial for SSL
+    info.protocols = protocols;
+    info.gid = -1;
+    info.uid = -1;
+    int port = 9443;
+
+    struct lws_context *context = lws_create_context(&info);
+    if (context == NULL)
+    {
+        LogInfo("Couldn't create context\n");
+        return -1;
+    }
+    /* connect the websocket to binance orderbook of all coins. */
+    for (int i = 0; i < MAX_COINS; i++)
+    {
+        if (0 != strcmp(state.coinStates[i].symbol, ""))
+        {
+            struct lws_client_connect_info ccinfo = {};
+            ccinfo.context = context;
+            ccinfo.address = MARKET_BASE_ENDP;
+            ccinfo.port = port;
+            // ccinfo.ssl_connection = 1;
+            char path[100];
+            sprintf(path, "ws/%s@depth", state.coinStates[i].symbol);
+            ccinfo.path = path;
+            ccinfo.host = ccinfo.address;
+            ccinfo.origin = ccinfo.address;
+            ccinfo.ssl_connection = LCCSCF_USE_SSL;
+            ccinfo.ietf_version_or_minus_one = -1;
+            ccinfo.protocol = "binance";
+            ccinfo.userdata = (void *)&state;
+            struct lws *lws = lws_client_connect_via_info(&ccinfo);
+            if (lws == NULL)
+            {
+                LogInfo("Connection failed\n");
+                return -1;
+            }
+            state.coinStates[i].lws = lws;
+        }
+    }
+    
+    /* connect the websocket to binance trade api*/
+    struct lws_client_connect_info ccinfoTrade = {};
+    ccinfoTrade.context = context;
+    ccinfoTrade.address = TRADE_BASE_ENDP;
+    ccinfoTrade.port = port;
+    ccinfoTrade.ssl_connection = 1;
+    ccinfoTrade.path = TRADE_PATH;
+    ccinfoTrade.host = ccinfoTrade.address;
+    ccinfoTrade.origin = ccinfoTrade.address;
+    ccinfoTrade.ssl_connection = LCCSCF_USE_SSL;
+    ccinfoTrade.ietf_version_or_minus_one = -1;
+    ccinfoTrade.protocol = "binance-trade";
+    struct per_session_data__minimal pss = {}; 
+    pss.state = &state;
+    pss.channel = &tradeChannel;
+    pss.buffer = NULL;
+    ccinfoTrade.userdata = (void *)&pss;
+    struct lws *lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
+    if (lwsTrade == NULL)
+    {
+        LogInfo("Connection failed\n");
+        return -1;
+    }
+    TradeThreadArgs tradeArgs = {
+        .channel = &tradeChannel,
+        .context = context,
+        .wsi = lwsTrade,
+        .pss = &pss
+    };
+
+    pthread_t tradeThreadId;
+
+    pthread_create(
+        &tradeThreadId,
+        NULL,
+        tradeThread,
+        &tradeArgs
+    ); 
+
+    for (int i = 0; i < MAX_COINS; i++)
+    {
+        pthread_t mainThreadId;
+        MainThreadArgs mainArgs = {
+            .context = context,
+            .wsi = lws,
+            .pss = &pss,
+            .index = i,
+            .curl = curl
+        };
+        pthread_create(
+                &mainThreadId,
+                NULL,
+                mainThread,
+                &mainArgs
+                );
+    }
+
+    // curl_easy_cleanup(curl);
+    // lws_context_destroy(context);
     return 0;
 }
