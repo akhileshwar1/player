@@ -19,18 +19,21 @@
 #define TRADE_BASE_ENDP "ws-api.binance.com"
 #define TRADE_PATH "/ws-api/v3"
 #define STREAM_PATH "/ws/solusdt@depth"
+#define XRP_STREAM_PATH "/ws/xrpusdt@depth"
 #define TRADE_STREAM_PATH "/ws/solusdt@trade"
 #define MAX_LEVELS 30
-#define MAX_EVENTS 100 
-#define MAX_TIME_PERIOD 5 * 60 * 60 * 1000 // 5 hours in milliseconds. 
+#define MAX_COINS 3
+#define MAX_EVENTS 100
+#define MAX_TIME_PERIOD 5 * 60 * 60 * 1000// 5 hours in milliseconds. 
 #define TRADE_FEE 0.1 / 100
 #define SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=SOLUSDT&limit=30"
+#define XRP_SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=XRPUSDT&limit=30"
 #define TRADE_URL "https://api.binance.com/api/v3/order?"
-#define MIN_REFRESH_TIME 5000 
-#define MAX_ORDERS 10 
-#define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */ 
-#define SPREAD_PCT 0.5 /* spread . */ 
-#define STOP_LOSS_PCT 0.1 /* stop loss . */ 
+#define MIN_REFRESH_TIME 5000
+#define MAX_ORDERS 10
+#define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */
+#define SPREAD_PCT 0.5 /* spread . */
+#define STOP_LOSS_PCT 0.1 /* stop loss . */
 #define STEP_SIZE 0.001
 #define POSITION_EPSILON 0.13
 
@@ -174,13 +177,13 @@ typedef struct
     real64 free;
 } Balance;
 
+typedef struct timespec timespec;
 typedef struct
 {
-    Balance *usdtBalance;
-    Balance *coinBalance;
-} Balances;
+    char symbol[100];
+    Balance balance;
+} Coin_state;
 
-typedef struct timespec timespec;
 typedef struct
 {
     char event[4096 * 10];
@@ -220,7 +223,8 @@ typedef struct
      * somewhere */
     Order orders[MAX_ORDERS];
     int currOrderIndex;
-    Balances *balances;
+    Balance usdtBalance;
+    Coin_state coinStates[MAX_COINS];
 } State;
 
 // Define a structure to hold your per-session (per-connection) data
@@ -973,30 +977,36 @@ handleTradeSocketResponse(
                             lockedStr
                            );
 
-                    if (strcmp(assetName, "SOL") == 0)
+                    if (strcmp(assetName, "USDT") != 0)
                     {
-                        pss->state->balances->coinBalance->free = strtod(freeStr, NULL);
-                        pss->state->balances->coinBalance->lock = strtod(lockedStr, NULL);
+                        for (int i = 0; i < MAX_COINS; i++)
+                        {
+                            if (0 == strcmp(pss->state->coinStates[i].symbol, assetName))
+                            {
+                                pss->state->coinStates[i].balance.free = strtod(freeStr, NULL);
+                                pss->state->coinStates[i].balance.lock = strtod(lockedStr, NULL);
 
-                        LogInfo(
-                                "SOL BALANCE: free=%f locked=%f total=%f\n",
-                                pss->state->balances->coinBalance->free,
-                                pss->state->balances->coinBalance->lock,
-                                pss->state->balances->coinBalance->free +
-                                pss->state->balances->coinBalance->lock
-                               );
+                                LogInfo(
+                                        "SOL BALANCE: free=%f locked=%f total=%f\n",
+                                        pss->state->coinStates[i].balance.free,
+                                        pss->state->coinStates[i].balance.lock,
+                                        pss->state->coinStates[i].balance.free +
+                                        pss->state->coinStates[i].balance.lock
+                                       );
+                            }
+                        }
                     }
                     else if (strcmp(assetName, "USDT") == 0)
                     {
-                        pss->state->balances->usdtBalance->free = strtod(freeStr, NULL);
-                        pss->state->balances->usdtBalance->lock = strtod(lockedStr, NULL);
+                        pss->state->usdtBalance.free = strtod(freeStr, NULL);
+                        pss->state->usdtBalance.lock = strtod(lockedStr, NULL);
 
                         LogInfo(
                                 "USDT BALANCE: free=%f locked=%f total=%f\n",
-                                pss->state->balances->usdtBalance->free,
-                                pss->state->balances->usdtBalance->lock,
-                                pss->state->balances->usdtBalance->free +
-                                pss->state->balances->usdtBalance->lock
+                                pss->state->usdtBalance.free,
+                                pss->state->usdtBalance.lock,
+                                pss->state->usdtBalance.free +
+                                pss->state->usdtBalance.lock
                                );
                     }
                 }
@@ -2522,15 +2532,21 @@ main()
     state.currOrderIndex = -1;
     state.SL = STOP_LOSS_PCT;
 
-    Balance usdtBalance = {};
-    Balance coinBalance = {};
+    char symbols[MAX_COINS][100] = {"solusdt", "xrpusdt"};
+    real64 coinBalances[MAX_COINS] = {0.289, 0};
 
-    Balances balances = {};
-    balances.usdtBalance = &usdtBalance;
+    for (int i = 0; i < MAX_COINS; i++)
+    {
+        if (0 != strcmp(state.coinStates[i].symbol, ""))
+        {
+            StringCpy(state.coinStates[i].symbol, symbols[i]);
+            state.coinStates[i].balance.free = coinBalances[i];
+        }
+    }
+
+    Balance usdtBalance = {};
     usdtBalance.free = 145.41;
-    balances.coinBalance = &coinBalance;
-    coinBalance.free = 0.289;
-    state.balances = &balances;
+    state.usdtBalance = usdtBalance;
     // lws_set_log_level(
     //     LLL_ERR |
     //     LLL_WARN |
@@ -2560,27 +2576,34 @@ main()
         LogInfo("Couldn't create context\n");
         return -1;
     }
-    /* connect the websocket to binance orderbook */
-    
-    struct lws_client_connect_info ccinfo = {};
-    ccinfo.context = context;
-    ccinfo.address = MARKET_BASE_ENDP;
-    ccinfo.port = port;
-    // ccinfo.ssl_connection = 1;
-    ccinfo.path = STREAM_PATH;
-    ccinfo.host = ccinfo.address;
-    ccinfo.origin = ccinfo.address;
-    ccinfo.ssl_connection = LCCSCF_USE_SSL;
-    ccinfo.ietf_version_or_minus_one = -1;
-    ccinfo.protocol = "binance";
-    ccinfo.userdata = (void *)&state;
-    struct lws *lws = lws_client_connect_via_info(&ccinfo);
-    if (lws == NULL)
+    /* connect the websocket to binance orderbook of all coins. */
+    for (int i = 0; i < MAX_COINS; i++)
     {
-        LogInfo("Connection failed\n");
-        return -1;
+        if (0 != strcmp(state.coinStates[i].symbol, ""))
+        {
+            struct lws_client_connect_info ccinfo = {};
+            ccinfo.context = context;
+            ccinfo.address = MARKET_BASE_ENDP;
+            ccinfo.port = port;
+            // ccinfo.ssl_connection = 1;
+            char path[100];
+            sprintf(path, "ws/%s@depth", state.coinStates[i].symbol);
+            ccinfo.path = path;
+            ccinfo.host = ccinfo.address;
+            ccinfo.origin = ccinfo.address;
+            ccinfo.ssl_connection = LCCSCF_USE_SSL;
+            ccinfo.ietf_version_or_minus_one = -1;
+            ccinfo.protocol = "binance";
+            ccinfo.userdata = (void *)&state;
+            struct lws *lws = lws_client_connect_via_info(&ccinfo);
+            if (lws == NULL)
+            {
+                LogInfo("Connection failed\n");
+                return -1;
+            }
+        }
     }
-
+    
     /* connect the websocket to binance trade api*/
     struct lws_client_connect_info ccinfoTrade = {};
     ccinfoTrade.context = context;
