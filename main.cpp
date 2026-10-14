@@ -191,6 +191,9 @@ typedef struct
     char event[4096 * 10];
     real64 startPrice;
     timespec lastTime;
+    timespec lastTimeExitRefresh;
+    timespec lastTimeDashboard;
+    Position position;
 } Coin_state;
 
 typedef struct
@@ -206,13 +209,10 @@ typedef struct
     real64 buyPressureParent;
     real64 sellPressureParent;
     real64 SL; /* stop loss in absolute value */
-    timespec lastTimeExitRefresh;
-    timespec lastTimeDashboard;
     timespec lastTimeParent;
     bool isOpen;
     bool isPriceTaken;
     Posn_type posnType; 
-    Position position;
     Wallet wallet;
     FILE *outputFile;
     time_t lastTradeTime;
@@ -249,6 +249,7 @@ typedef struct
 
 typedef struct
 {
+    Channel *channel;
     struct lws_context *context;
     struct lws *wsi;
 
@@ -542,6 +543,15 @@ UpdateOrderFromUserData(
             {
 
                 order->status = COMPLETED;
+                Coin_state *coinState;
+                for (int i = 0; i < MAX_COINS; i++)
+                {
+                    if (0 == strcmp(state->coinStates[i].symbol, order->coin))
+                    {
+                        coinState = &state->coinStates[i];
+                        break;
+                    }
+                }
 
                 /*
                  * Use actual execution information from the
@@ -574,9 +584,9 @@ UpdateOrderFromUserData(
                  * Position update.
                  */
                 Assert(
-                        state->position.symbol == NULL ||
+                        coinState->position.symbol == NULL ||
                         strcmp(
-                            state->position.symbol,
+                            coinState->position.symbol,
                             order->coin
                             ) == 0
                       )
@@ -587,10 +597,10 @@ UpdateOrderFromUserData(
                     : (executedQty);
 
                 real64 oldQty =
-                    state->position.qty;
+                    coinState->position.qty;
 
                 real64 oldPrice =
-                    state->position.price;
+                    coinState->position.price;
 
                 real64 newQty =
                     floor((oldQty + signedQty) / STEP_SIZE) * STEP_SIZE;
@@ -600,7 +610,7 @@ UpdateOrderFromUserData(
                  */
                 if (oldQty == 0.0)
                 {
-                    state->position.price = executionPrice;
+                    coinState->position.price = executionPrice;
                 }
                 else if (
                         (oldQty > 0.0 && signedQty > 0.0) ||
@@ -611,7 +621,7 @@ UpdateOrderFromUserData(
                      * Adding to the same side:
                      * weighted average entry price.
                      */
-                    state->position.price =
+                    coinState->position.price =
                         (
                          fabs(oldQty) * oldPrice +
                          fabs(signedQty) * executionPrice
@@ -624,18 +634,18 @@ UpdateOrderFromUserData(
                     /*
                      * Fully closed.
                      */
-                    state->position.price = 0.0;
+                    coinState->position.price = 0.0;
                 }
 
-                state->position.qty =
+                coinState->position.qty =
                     newQty;
 
-                state->position.ltp =
+                coinState->position.ltp =
                     executionPrice;
 
                 /* realised pnl */
-                state->position.rpnl = (signedQty * executionPrice) + (oldQty * oldPrice);
-                state->position.timestamp =
+                coinState->position.rpnl = (signedQty * executionPrice) + (oldQty * oldPrice);
+                coinState->position.timestamp =
                     order->timestamp;
             }
         }
@@ -763,6 +773,15 @@ UpdateOrderFromBinance(
             if (order->status != COMPLETED)
             {
             order->status = COMPLETED;
+            Coin_state *coinState;
+            for (int i = 0; i < MAX_COINS; i++)
+            {
+                if (0 == strcmp(state->coinStates[i].symbol, order->coin))
+                {
+                    coinState = &state->coinStates[i];
+                    break;
+                }
+            }
             yyjson_val *executedQtyVal =
                 yyjson_obj_get(result, "executedQty");
 
@@ -788,7 +807,7 @@ UpdateOrderFromBinance(
              "selfTradePreventionMode":"EXPIRE_MAKER"},
              "rateLimits":[{"rateLimitType":"ORDERS",
              "interval":"SECOND","intervalNum":10,"limit":100,"count":1},{"rateLimitType"' */
-            real64 executionPrice = getBestQuote(&state->OrderBook).price;
+            real64 executionPrice = getBestQuote(&coinState->OrderBook).price;
                 // executionPriceVal
                 // ? atof(yyjson_get_str(executionPriceVal))
                 // : 0.0;
@@ -804,9 +823,9 @@ UpdateOrderFromBinance(
              * Position update.
              */
             Assert(
-                    state->position.symbol == NULL ||
+                    coinState->position.symbol == NULL ||
                     strcmp(
-                        state->position.symbol,
+                        coinState->position.symbol,
                         order->coin
                         ) == 0
                   )
@@ -817,10 +836,10 @@ UpdateOrderFromBinance(
                : (executedQty);
 
             real64 oldQty =
-                state->position.qty;
+                coinState->position.qty;
 
             real64 oldPrice =
-                state->position.price;
+                coinState->position.price;
 
             real64 newQty =
                 floor((oldQty + signedQty) / STEP_SIZE) * STEP_SIZE;
@@ -830,7 +849,7 @@ UpdateOrderFromBinance(
              */
             if (oldQty == 0.0)
             {
-                state->position.price = executionPrice;
+                coinState->position.price = executionPrice;
             }
             else if (
                     (oldQty > 0.0 && signedQty > 0.0) ||
@@ -841,7 +860,7 @@ UpdateOrderFromBinance(
                  * Adding to the same side:
                  * weighted average entry price.
                  */
-                state->position.price =
+                coinState->position.price =
                     (
                      fabs(oldQty) * oldPrice +
                      fabs(signedQty) * executionPrice
@@ -854,18 +873,18 @@ UpdateOrderFromBinance(
                 /*
                  * Fully closed.
                  */
-                state->position.price = 0.0;
+                coinState->position.price = 0.0;
             }
 
-            state->position.qty =
+            coinState->position.qty =
                 newQty;
 
-            state->position.ltp =
+            coinState->position.ltp =
                 executionPrice;
 
             /* realised pnl */
-            state->position.rpnl = (signedQty * executionPrice) + (oldQty * oldPrice);
-            state->position.timestamp =
+            coinState->position.rpnl = (signedQty * executionPrice) + (oldQty * oldPrice);
+            coinState->position.timestamp =
                 order->timestamp;
             }
         }
@@ -1590,12 +1609,12 @@ ApplyEvent(Market_event event, Order_book *OrderBook)
 }
 
 void
-LoadBufferAndApplyEvent(Market_event marketEvent, State *state, char *input)
+LoadBufferAndApplyEvent(Market_event marketEvent, Coin_state *coinState, char *input)
 {
     yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
-    Order_book *OrderBook = &state->OrderBook;
-    Market_events_buffer *MarketEventsBuffer = &state->MarketEventsBuffer;
-    bool AreEventsApplied = state->AreEventsApplied;
+    Order_book *OrderBook = &coinState->OrderBook;
+    Market_events_buffer *MarketEventsBuffer = &coinState->MarketEventsBuffer;
+    bool AreEventsApplied = coinState->AreEventsApplied;
     LoadMarketEvent(doc, &marketEvent);
     if (!AreEventsApplied)
     {
@@ -1705,7 +1724,7 @@ CallbackBinance(struct lws *wsi,
         case LWS_CALLBACK_CLIENT_RECEIVE:
             {
                 ((char *)in)[len] = '\0';
-                State *state = ((State *)user);
+                Coin_state *coinState = ((Coin_state *)user);
                 Assert(len <= 4096 * 10)
                 char buf[4096 * 10];
                 memcpy(buf, in, len);
@@ -1717,20 +1736,20 @@ CallbackBinance(struct lws *wsi,
                 bool isComplete = IsEventComplete(buf);
                 if (!isComplete)
                 {
-                    Assert(StringLength(state->event) + StringLength(buf) < 4096 * 10)
-                    StringCat(state->event, buf);
+                    Assert(StringLength(coinState->event) + StringLength(buf) < 4096 * 10)
+                    StringCat(coinState->event, buf);
                 }
                 else
                 {
-                    LoadBufferAndApplyEvent(marketEvent, (State *)user, buf);
+                    LoadBufferAndApplyEvent(marketEvent, coinState, buf);
                 }
 
-                isComplete = IsEventComplete(((State *)user)->event); 
+                isComplete = IsEventComplete(coinState->event); 
                 if (isComplete)
                 {
                     // LogInfo("NOT null anymore %s\n", ((State *)user)->event);
-                    LoadBufferAndApplyEvent(marketEvent, (State *)user, buf);
-                    memset(state->event, 0, sizeof(state->event));
+                    LoadBufferAndApplyEvent(marketEvent, coinState, buf);
+                    memset(coinState->event, 0, sizeof(coinState->event));
                 }
                 break;
             }
@@ -1775,232 +1794,232 @@ LoadTradeEvent(Trade_event *trade, char *input, State *state)
     yyjson_doc_free(doc);
 }
 
-int
-CallbackBinanceTradeStream(struct lws *wsi,
-                enum lws_callback_reasons reason,
-                void *user, void *in, size_t len)
-{
-    (void) wsi;
-    switch (reason)
-    {
-        case LWS_CALLBACK_CLIENT_ESTABLISHED:
-            LogInfo("callback_binance: LWS_CALLBACK_CLIENT_ESTABLISHED\n");
-            break;
-
-        case LWS_CALLBACK_CLOSED:
-            LogInfo("LWS_CALLBACK_CLOSED\n");
-            break;
-
-        case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
-            LogInfo("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
-            break;
-
-        case LWS_CALLBACK_CLIENT_RECEIVE:
-            {
-                State *state = ((State *)user);
-                state->lastTradeTime = time(NULL);
-                Assert(len <= 4096)
-                char buf[4096];
-                memcpy(buf, in, len);
-                buf[len] = '\0';
-                // ((char *)in)[len] = '\0';
-                LogInfo("rx Trade %d '%s'\n", (int)len, buf);
-                Position position = state->position;
-                Trade_event tradeEvent = {};
-                bool isComplete = IsEventComplete(buf);
-                if (!isComplete)
-                {
-                    Assert(StringLength(state->event) + StringLength(buf) < 4096)
-                    StringCat(state->event, buf);
-                }
-                else
-                {
-                    LoadTradeEvent(&tradeEvent, buf, state);
-                    BufferTradeEvent(tradeEvent, &state->TradeEventsBuffer);
-                }
-
-                isComplete = IsEventComplete(state->event); 
-                if (isComplete)
-                {
-                    LogInfo("NOT null anymore %s\n", state->event);
-                    LoadTradeEvent(&tradeEvent, buf, state);
-                    BufferTradeEvent(tradeEvent, &state->TradeEventsBuffer);
-                    memset(state->event, 0, sizeof(state->event));
-                }
-
-                real64 buyPressure = state->buyPressure;
-                real64 sellPressure = state->sellPressure;
-                real64 lastPrice = state->
-                    TradeEventsBuffer.
-                    buffer[MAX_EVENTS - 1].price;
-
-                LogInfo("last price is %f\n", lastPrice);
-                if (!(state->isPriceTaken) || state->startPrice == 0.0)
-                {
-                    LogInfo("setting the start price\n");
-                    state->startPrice = lastPrice;
-                    state->startPriceParent = lastPrice;
-                    state->isPriceTaken = true;
-                }
-
-                if (!state->isOpen &&
-                    lastPrice != 0.0)
-                {
-                    timespec endTime;
-                    clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
-                    real64 timeElapsedMS = XtimeElapsedMS(
-                        state->lastTime,
-                        endTime
-                    );
-
-                    real64 timeElapsedMSParent = XtimeElapsedMS(
-                        state->lastTimeParent,
-                        endTime
-                    );
-                    LogInfo("refresh Times are %f - %f\n", state->timeToRefresh, state->timeToRefreshParent);
-                    LogInfo("Times are %f - %f\n", timeElapsedMS, timeElapsedMSParent);
-
-                    if (timeElapsedMS > ((State *)user)->timeToRefresh)
-                    {
-                        state->startPrice = lastPrice;
-                        state->lastTime = endTime;
-                        state->buyPressure = 0.0;
-                        state->sellPressure = 0.0;
-                    }
-
-                    if (timeElapsedMSParent > state->timeToRefreshParent)
-                    {
-                        LogInfo("Refreshing Parent\n");
-                        state->startPriceParent   = lastPrice;
-                        state->lastTimeParent     = endTime;
-                        state->buyPressureParent  = 0.0;
-                        state->sellPressureParent = 0.0;
-                    }
-
-                    LogInfo("start price is %f\n", state->startPrice);
-
-                    if (abs((lastPrice - state->startPrice)) < 1.5)
-                    {
-                        LogInfo("Guilty! There is no price movement\n");
-                    }
-                    else
-                    {
-                        
-                        if (lastPrice > (state->startPrice))
-                        {
-                            if (buyPressure < 1.1 * sellPressure)
-                            {
-                                LogInfo("Guilty! Not enough pressure on buy side\n");
-                            }
-                            else if (timeElapsedMS < 4 * 55 * 60 * 1000)
-                            {
-                                LogInfo("Guilty! Too fast, need real slow and steady!\n");
-                            }
-                            else if (lastPrice <= state->startPriceParent ||
-                                state->buyPressureParent < state->sellPressureParent)
-                            {
-                                LogInfo("Guilty! Parent has done work in the opposite/choppy direction\n");
-                                LogInfo("%f-%f, %f-%f\n", lastPrice, state->startPriceParent,
-                                        state->buyPressureParent,
-                                        state->sellPressureParent);
-                            }
-                            else
-                            {
-                                state->shouldPlaceOrder = true;
-                                state->orderType = OPENBUY;
-                            }
-                        }
-                        else
-                        {
-                            if (sellPressure < 1.1 * buyPressure)
-                            {
-                                LogInfo("Guilty! Not enough pressure on sell side\n");
-                            }
-                            else if (timeElapsedMS < 4 * 55 * 60 * 1000)
-                            {
-                                LogInfo("Guilty! Too fast, need real slow and steady!\n");
-                            }
-                            else if (lastPrice >= state->startPriceParent ||
-                                state->buyPressureParent > state->sellPressureParent)
-                            {
-                                LogInfo( "Guilty! Parent has done work in the opposite/choppy direction\n");
-                                LogInfo("%f-%f, %f-%f\n", lastPrice,
-                                                         state->startPriceParent,
-                                                         state->buyPressureParent,
-                                                         state->sellPressureParent);
-                            }
-                            else
-                            {
-                                state->shouldPlaceOrder = true;
-                                state->orderType = OPENSELL;
-                            }
-                        }
-                    }
-                }
-                // close the position.
-                else if (((State *)user)->isOpen &&
-                         lastPrice != 0.0)
-                {
-
-                    timespec endTime;
-                    clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
-                    real64 timeElapsedMS = XtimeElapsedMS(
-                        ((State *)user)->lastTime,
-                        endTime
-                    );
-                    Posn_type posnType = ((State *)user)->posnType;
-                    LogInfo("position is open, remaining time %f\n",
-                           ((State *)user)->timeToClose - timeElapsedMS);
-
-                    if(timeElapsedMS < state->timeToClose &&
-                        ((posnType == LONG && ((lastPrice - state->startPrice) * position.qty) > -0.35) ||
-                        (posnType == SHORT && ((lastPrice - state->startPrice) * position.qty) > -0.35))) 
-                    {
-                        LogInfo("Guilty! No need to close, time not out and loss in check\n");
-                    }
-                    else if(posnType == LONG &&
-                            (buyPressure > 2 * sellPressure && 
-                            ((state->startPrice - lastPrice) > 0.5)) &&
-                            (state->timeToClose * 2 < MAX_TIME_PERIOD)) 
-                    {
-                        LogInfo("Guilty! No need to close, long pressure not reversed, so Load up!\n");
-                        LogInfo("Loading the position at lastPrice %f\n", lastPrice);
-                        state->shouldPlaceOrder = true;
-                        state->orderType = LOADBUY;
-                    }
-                    else if(posnType == SHORT &&
-                            (sellPressure > 2 * buyPressure && 
-                            ((state->startPrice - lastPrice) > 0.5)) &&
-                            (state->timeToClose * 2 < MAX_TIME_PERIOD)) 
-                    {
-                        LogInfo("Guilty! No need to close, short pressure not reversed, so Load up!\n");
-                        LogInfo("Loading the position at lastPrice %f\n", lastPrice);
-                        state->shouldPlaceOrder = true;
-                        state->orderType = LOADSELL;
-                    }
-                    else // will only close now when the pressure's have reversed.
-                    {
-                        LogInfo("closing the position at lastPrice %f\n", lastPrice);
-                        if (posnType == LONG)
-                        {
-                            state->shouldPlaceOrder = true;
-                            state->orderType = CLOSELONG;
-                        }
-                        else if (posnType == SHORT)
-                        {
-                            state->shouldPlaceOrder = true;
-                            state->orderType = CLOSESHORT;
-                        }
-                    }
-                }
-                break;
-            }
-
-        default:
-            break;
-    }
-    return 0;
-}
+// int
+// CallbackBinanceTradeStream(struct lws *wsi,
+//                 enum lws_callback_reasons reason,
+//                 void *user, void *in, size_t len)
+// {
+//     (void) wsi;
+//     switch (reason)
+//     {
+//         case LWS_CALLBACK_CLIENT_ESTABLISHED:
+//             LogInfo("callback_binance: LWS_CALLBACK_CLIENT_ESTABLISHED\n");
+//             break;
+//
+//         case LWS_CALLBACK_CLOSED:
+//             LogInfo("LWS_CALLBACK_CLOSED\n");
+//             break;
+//
+//         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+//             LogInfo("LWS_CALLBACK_CLIENT_CONNECTION_ERROR\n");
+//             break;
+//
+//         case LWS_CALLBACK_CLIENT_RECEIVE:
+//             {
+//                 State *state = ((State *)user);
+//                 state->lastTradeTime = time(NULL);
+//                 Assert(len <= 4096)
+//                 char buf[4096];
+//                 memcpy(buf, in, len);
+//                 buf[len] = '\0';
+//                 // ((char *)in)[len] = '\0';
+//                 LogInfo("rx Trade %d '%s'\n", (int)len, buf);
+//                 Position position = state->position;
+//                 Trade_event tradeEvent = {};
+//                 bool isComplete = IsEventComplete(buf);
+//                 if (!isComplete)
+//                 {
+//                     Assert(StringLength(state->event) + StringLength(buf) < 4096)
+//                     StringCat(state->event, buf);
+//                 }
+//                 else
+//                 {
+//                     LoadTradeEvent(&tradeEvent, buf, state);
+//                     BufferTradeEvent(tradeEvent, &state->TradeEventsBuffer);
+//                 }
+//
+//                 isComplete = IsEventComplete(state->event); 
+//                 if (isComplete)
+//                 {
+//                     LogInfo("NOT null anymore %s\n", state->event);
+//                     LoadTradeEvent(&tradeEvent, buf, state);
+//                     BufferTradeEvent(tradeEvent, &state->TradeEventsBuffer);
+//                     memset(state->event, 0, sizeof(state->event));
+//                 }
+//
+//                 real64 buyPressure = state->buyPressure;
+//                 real64 sellPressure = state->sellPressure;
+//                 real64 lastPrice = state->
+//                     TradeEventsBuffer.
+//                     buffer[MAX_EVENTS - 1].price;
+//
+//                 LogInfo("last price is %f\n", lastPrice);
+//                 if (!(state->isPriceTaken) || state->startPrice == 0.0)
+//                 {
+//                     LogInfo("setting the start price\n");
+//                     state->startPrice = lastPrice;
+//                     state->startPriceParent = lastPrice;
+//                     state->isPriceTaken = true;
+//                 }
+//
+//                 if (!state->isOpen &&
+//                     lastPrice != 0.0)
+//                 {
+//                     timespec endTime;
+//                     clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
+//                     real64 timeElapsedMS = XtimeElapsedMS(
+//                         state->lastTime,
+//                         endTime
+//                     );
+//
+//                     real64 timeElapsedMSParent = XtimeElapsedMS(
+//                         state->lastTimeParent,
+//                         endTime
+//                     );
+//                     LogInfo("refresh Times are %f - %f\n", state->timeToRefresh, state->timeToRefreshParent);
+//                     LogInfo("Times are %f - %f\n", timeElapsedMS, timeElapsedMSParent);
+//
+//                     if (timeElapsedMS > ((State *)user)->timeToRefresh)
+//                     {
+//                         state->startPrice = lastPrice;
+//                         state->lastTime = endTime;
+//                         state->buyPressure = 0.0;
+//                         state->sellPressure = 0.0;
+//                     }
+//
+//                     if (timeElapsedMSParent > state->timeToRefreshParent)
+//                     {
+//                         LogInfo("Refreshing Parent\n");
+//                         state->startPriceParent   = lastPrice;
+//                         state->lastTimeParent     = endTime;
+//                         state->buyPressureParent  = 0.0;
+//                         state->sellPressureParent = 0.0;
+//                     }
+//
+//                     LogInfo("start price is %f\n", state->startPrice);
+//
+//                     if (abs((lastPrice - state->startPrice)) < 1.5)
+//                     {
+//                         LogInfo("Guilty! There is no price movement\n");
+//                     }
+//                     else
+//                     {
+//
+//                         if (lastPrice > (state->startPrice))
+//                         {
+//                             if (buyPressure < 1.1 * sellPressure)
+//                             {
+//                                 LogInfo("Guilty! Not enough pressure on buy side\n");
+//                             }
+//                             else if (timeElapsedMS < 4 * 55 * 60 * 1000)
+//                             {
+//                                 LogInfo("Guilty! Too fast, need real slow and steady!\n");
+//                             }
+//                             else if (lastPrice <= state->startPriceParent ||
+//                                 state->buyPressureParent < state->sellPressureParent)
+//                             {
+//                                 LogInfo("Guilty! Parent has done work in the opposite/choppy direction\n");
+//                                 LogInfo("%f-%f, %f-%f\n", lastPrice, state->startPriceParent,
+//                                         state->buyPressureParent,
+//                                         state->sellPressureParent);
+//                             }
+//                             else
+//                             {
+//                                 state->shouldPlaceOrder = true;
+//                                 state->orderType = OPENBUY;
+//                             }
+//                         }
+//                         else
+//                         {
+//                             if (sellPressure < 1.1 * buyPressure)
+//                             {
+//                                 LogInfo("Guilty! Not enough pressure on sell side\n");
+//                             }
+//                             else if (timeElapsedMS < 4 * 55 * 60 * 1000)
+//                             {
+//                                 LogInfo("Guilty! Too fast, need real slow and steady!\n");
+//                             }
+//                             else if (lastPrice >= state->startPriceParent ||
+//                                 state->buyPressureParent > state->sellPressureParent)
+//                             {
+//                                 LogInfo( "Guilty! Parent has done work in the opposite/choppy direction\n");
+//                                 LogInfo("%f-%f, %f-%f\n", lastPrice,
+//                                                          state->startPriceParent,
+//                                                          state->buyPressureParent,
+//                                                          state->sellPressureParent);
+//                             }
+//                             else
+//                             {
+//                                 state->shouldPlaceOrder = true;
+//                                 state->orderType = OPENSELL;
+//                             }
+//                         }
+//                     }
+//                 }
+//                 // close the position.
+//                 else if (((State *)user)->isOpen &&
+//                          lastPrice != 0.0)
+//                 {
+//
+//                     timespec endTime;
+//                     clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
+//                     real64 timeElapsedMS = XtimeElapsedMS(
+//                         ((State *)user)->lastTime,
+//                         endTime
+//                     );
+//                     Posn_type posnType = ((State *)user)->posnType;
+//                     LogInfo("position is open, remaining time %f\n",
+//                            ((State *)user)->timeToClose - timeElapsedMS);
+//
+//                     if(timeElapsedMS < state->timeToClose &&
+//                         ((posnType == LONG && ((lastPrice - state->startPrice) * position.qty) > -0.35) ||
+//                         (posnType == SHORT && ((lastPrice - state->startPrice) * position.qty) > -0.35))) 
+//                     {
+//                         LogInfo("Guilty! No need to close, time not out and loss in check\n");
+//                     }
+//                     else if(posnType == LONG &&
+//                             (buyPressure > 2 * sellPressure && 
+//                             ((state->startPrice - lastPrice) > 0.5)) &&
+//                             (state->timeToClose * 2 < MAX_TIME_PERIOD)) 
+//                     {
+//                         LogInfo("Guilty! No need to close, long pressure not reversed, so Load up!\n");
+//                         LogInfo("Loading the position at lastPrice %f\n", lastPrice);
+//                         state->shouldPlaceOrder = true;
+//                         state->orderType = LOADBUY;
+//                     }
+//                     else if(posnType == SHORT &&
+//                             (sellPressure > 2 * buyPressure && 
+//                             ((state->startPrice - lastPrice) > 0.5)) &&
+//                             (state->timeToClose * 2 < MAX_TIME_PERIOD)) 
+//                     {
+//                         LogInfo("Guilty! No need to close, short pressure not reversed, so Load up!\n");
+//                         LogInfo("Loading the position at lastPrice %f\n", lastPrice);
+//                         state->shouldPlaceOrder = true;
+//                         state->orderType = LOADSELL;
+//                     }
+//                     else // will only close now when the pressure's have reversed.
+//                     {
+//                         LogInfo("closing the position at lastPrice %f\n", lastPrice);
+//                         if (posnType == LONG)
+//                         {
+//                             state->shouldPlaceOrder = true;
+//                             state->orderType = CLOSELONG;
+//                         }
+//                         else if (posnType == SHORT)
+//                         {
+//                             state->shouldPlaceOrder = true;
+//                             state->orderType = CLOSESHORT;
+//                         }
+//                     }
+//                 }
+//                 break;
+//             }
+//
+//         default:
+//             break;
+//     }
+//     return 0;
+// }
 
 static struct lws_protocols protocols[] = {
     {
@@ -2009,12 +2028,12 @@ static struct lws_protocols protocols[] = {
         0,
         1024,
     },
-    {
-        "binance-trade-stream",
-        CallbackBinanceTradeStream,
-        0,
-        1024,
-    },
+    // {
+    //     "binance-trade-stream",
+    //     CallbackBinanceTradeStream,
+    //     0,
+    //     1024,
+    // },
     {
         "binance-trade",
         CallbackBinanceTrade,
@@ -2068,7 +2087,7 @@ SetOrderBook(Coin_state *state)
 }
 
 void
-PrintOrderBook(State *state)
+PrintOrderBook(Coin_state *state)
 {
     Order_book *OrderBook = &state->OrderBook;
     LogInfo("BIDS===================\n");
@@ -2090,7 +2109,7 @@ void
 PrintTradeState(State *state)
 {
     LogInfo("FORCES===================\n");
-    LogInfo("START PRICE %f\n", state->startPrice); 
+    // LogInfo("START PRICE %f\n", state->startPrice); 
     LogInfo("SELL PRESSURE %f\n", state->sellPressure); 
     LogInfo("BUY PRESSURE %f\n", state->buyPressure); 
 }
@@ -2142,9 +2161,6 @@ IgnoreAndApplyEvents(Coin_state *state)
         *AreEventsApplied = false;
     }
 }
-
-
-
 
 
 int
@@ -2491,31 +2507,33 @@ mainThread(void *arg)
     MainThreadArgs *args = (MainThreadArgs *)arg;
     State *state = args->pss->state;
     int index = args->index;
+    Coin_state *coinState = &state->coinStates[index];
     CURL *curl = args->curl;
+    Channel *tradeChannel = args->channel;
     while (1)
     {
-        if (state->coinStates[index].MarketEventsBuffer.currentWriteIndex > 0 &&
-                !state->coinStates[index].isSnapshot) {
+        if (coinState->MarketEventsBuffer.currentWriteIndex > 0 &&
+                !coinState->isSnapshot) {
             // LogInfo("Checking for snapshot...\n");
             curl_easy_setopt(curl, CURLOPT_URL, SNAPSHOT_URL);
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&state->coinStates[index].snapshot);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&coinState->snapshot);
             CURLcode result = curl_easy_perform(curl);
             if (result != CURLE_OK) {
                 curl_easy_cleanup(curl);
-                free(state->coinStates[index].snapshot.resp);
-                state->coinStates[index].snapshot.resp = NULL;
-                state->coinStates[index].snapshot.size = 0;
+                free(coinState->snapshot.resp);
+                coinState->snapshot.resp = NULL;
+                coinState->snapshot.size = 0;
                 LogInfo("curl call failed!, %s abort!\n", curl_easy_strerror(result));
                 break;
             }
-            char *input = (char *)state->coinStates[index].snapshot.resp;
+            char *input = (char *)coinState->snapshot.resp;
             yyjson_doc *doc = yyjson_read(input, StringLength(input), 0);
             yyjson_val *root = yyjson_doc_get_root(doc);
             yyjson_val *id = yyjson_obj_get(root, "lastUpdateId");
             uint64 lastUpdateId = (uint64)yyjson_get_int(id);
             // LogInfo("Last update id is %lu\n", lastUpdateId);
-            Market_event firstEvent = state->coinStates[index].MarketEventsBuffer.buffer[0];
+            Market_event firstEvent = coinState->MarketEventsBuffer.buffer[0];
             // LogInfo("first update id is %lu\n", firstEvent.U);
             // LogInfo("Compare: lastUpdateId %lu with first event id %lu\n",
             // lastUpdateId, firstEvent.U);
@@ -2523,19 +2541,19 @@ mainThread(void *arg)
             // state.MarketEventsBuffer.currentWriteIndex);
             if (lastUpdateId > firstEvent.U) {
                 // LogInfo("LastUpdateId %lu > the first buffered event id!", lastUpdateId);
-                state->coinStates[index].isSnapshot = true;
+                coinState->isSnapshot = true;
             }
             // curl_easy_cleanup(curl);
             yyjson_doc_free(doc);
         }
-        else if (state->coinStates[index].isSnapshot &&
-                !state->coinStates[index].AreEventsApplied)
+        else if (coinState->isSnapshot &&
+                !coinState->AreEventsApplied)
         {
-            SetOrderBook(&state);
+            SetOrderBook(coinState);
             // LogInfo("Order book id is %lu\n", state.OrderBook.lastUpdateId);
             // discard/ignore the buffered events where the id < snapshot id
             // apply the buffered events to the order book
-            IgnoreAndApplyEvents(&state);
+            IgnoreAndApplyEvents(coinState);
         }
 
 
@@ -2572,42 +2590,42 @@ mainThread(void *arg)
         timespec endTime;
         clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
         real64 timeElapsedMS = XtimeElapsedMS(
-                state.lastTimeDashboard,
+                coinState->lastTimeDashboard,
                 endTime
                 );
         if (timeElapsedMS > 250)
         {
-            state.lastTimeDashboard = endTime;
+            coinState->lastTimeDashboard = endTime;
             DashboardRender(
-                    &state.position,
-                    state.orders,
-                    state.currOrderIndex + 1
+                    &coinState->position,
+                    state->orders,
+                    state->currOrderIndex + 1
                     );
         }
 
-        LogInfo("state position qty is %f\n", state.position.qty);
-        if (fabs(state.position.qty) < POSITION_EPSILON)
+        LogInfo("state position qty is %f\n", coinState->position.qty);
+        if (fabs(coinState->position.qty) < POSITION_EPSILON)
         {    
-            state.position.qty = 0.0;
+            coinState->position.qty = 0.0;
             /* check if refresh and
                create the pair of orders with the target spread. */
             real64 timeElapsedMS = XtimeElapsedMS(
-                    state.lastTime,
+                    coinState->lastTime,
                     endTime
                     );
             // LogInfo("time elapsed is %f\n", timeElapsedMS);
             if (timeElapsedMS >= MIN_REFRESH_TIME)
             {
-                state.lastTime = endTime;
+                coinState->lastTime = endTime;
                 LogInfo("TIME ELAPSED=====\n");
-                cancelAllOrders(&state, &tradeChannel);
-                if (allOrdersCanceled(&state))
+                cancelAllOrders(state, tradeChannel);
+                if (allOrdersCanceled(state))
                 {
 
                     // createNewPair(state.orders);
                     real64 mid =
-                        (state.OrderBook.bids[0].price +
-                         state.OrderBook.asks[0].price) / 2.0; 
+                        (coinState->OrderBook.bids[0].price +
+                         coinState->OrderBook.asks[0].price) / 2.0; 
                     LogInfo("Mid is %f\n", mid);
                     Order buyOrder = {};
                     Order sellOrder = {};
@@ -2620,13 +2638,13 @@ mainThread(void *arg)
                     buyOrder.side = BUY;
                     buyOrder.type = LIMIT;
                     buyOrder.qty = fmin(0.15,
-                            state.balances->usdtBalance->free);
+                            state->usdtBalance.free);
                     // buyOrder.price = state.OrderBook.bids[SPREAD_LEVEL].price; 
                     buyOrder.status = PENDING; 
                     strcpy(sellOrder.coin, "SOLUSDT");
                     sellOrder.side = SELL;
                     sellOrder.type = LIMIT;
-                    sellOrder.qty = fmin(0.15, state.balances->coinBalance->free);
+                    sellOrder.qty = fmin(0.15, coinState->balance.free);
                     // sellOrder.price = state.OrderBook.asks[SPREAD_LEVEL].price;
                     sellOrder.status = PENDING; 
                     char uuidStr[37];
@@ -2638,19 +2656,19 @@ mainThread(void *arg)
                     strcpy(buyOrder.reqId, uuidStr);
                     generateUUID(uuidStr);
                     strcpy(sellOrder.reqId, uuidStr);
-                    int res = putOrderInState(&state, buyOrder);
+                    int res = putOrderInState(state, buyOrder);
                     if (res >= 0)
                     {
                         /* assuming orders will be cancelled and we will have 
                          * slots to fill in state.orders */
-                        int res = sendOrder(&buyOrder, &tradeChannel);
+                        int res = sendOrder(&buyOrder, tradeChannel);
                     }
-                    res = putOrderInState(&state, sellOrder);
+                    res = putOrderInState(state, sellOrder);
                     if (res >= 0)
                     {
                         /* assuming orders will be cancelled and we will have 
                          * slots to fill in state.orders */
-                        int res = sendOrder(&sellOrder, &tradeChannel);
+                        int res = sendOrder(&sellOrder, tradeChannel);
                     }
                 }
             }
@@ -2660,44 +2678,44 @@ mainThread(void *arg)
             LogInfo("CHECKING SL======\n");
             /* update the position's pnl and if >= sl, cancel 
                the other order */
-            quote bestQ = getBestQuote(&state.OrderBook);
+            quote bestQ = getBestQuote(&coinState->OrderBook);
             real64 ltp = bestQ.price;
-            state.position.ltp = ltp;
-            state.position.upnl = (ltp - state.position.price) * state.position.qty;
+            coinState->position.ltp = ltp;
+            coinState->position.upnl = (ltp - coinState->position.price) * coinState->position.qty;
             real64 timeElapsedMS = XtimeElapsedMS(
-                    state.lastTimeExitRefresh,
+                    coinState->lastTimeExitRefresh,
                     endTime
                     );
             LogInfo("time elapsed is %f=====\n", timeElapsedMS);
-            if (state.position.upnl < 0 &&
-                    fabs(state.position.upnl) >=
-                    (state.position.price * state.position.qty * (state.SL / 100)))
+            if (coinState->position.upnl < 0 &&
+                    fabs(coinState->position.upnl) >=
+                    (coinState->position.price * coinState->position.qty * (state->SL / 100)))
             {
                 LogInfo("SL HIT ======\n");
                 /* close the position and cancel all orders */
-                cancelAllOrders(&state, &tradeChannel);
-                if (allOrdersCanceled(&state))
+                cancelAllOrders(state, tradeChannel);
+                if (allOrdersCanceled(state))
                 {
                     Order closeOrder = {};
                     closeOrder.timestamp = XgetTimestamp();
-                    closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
+                    closeOrder.side = (coinState->position.qty > 0) ? SELL : BUY;
                     closeOrder.type = MARKET;
-                    closeOrder.qty = (state.position.qty > 0) ?
-                        fabs(fmin(state.position.qty,
-                                    state.balances->coinBalance->free)) :
-                        fabs(fmin(state.position.qty,
-                                    state.balances->usdtBalance->free));
+                    closeOrder.qty = (coinState->position.qty > 0) ?
+                        fabs(fmin(coinState->position.qty,
+                                    coinState->balance.free)) :
+                        fabs(fmin(coinState->position.qty,
+                                    state->usdtBalance.free));
                     closeOrder.status = PENDING;
-                    strcpy(closeOrder.coin, state.position.symbol);
+                    strcpy(closeOrder.coin, coinState->position.symbol);
                     char uuidStr[37];
                     generateUUID(uuidStr);
                     strcpy(closeOrder.id, uuidStr);
                     generateUUID(uuidStr);
                     strcpy(closeOrder.reqId, uuidStr);
-                    int res = putOrderInState(&state, closeOrder);
+                    int res = putOrderInState(state, closeOrder);
                     if (res >= 0)
                     {
-                        int res = sendOrder(&closeOrder, &tradeChannel);
+                        int res = sendOrder(&closeOrder, tradeChannel);
                         if (res < 0) LogInfo("couldn't close order \n");
                     }
                     /*TODO(Akhil): this is a fix, i just want it to start quoting again */
@@ -2706,39 +2724,39 @@ mainThread(void *arg)
             }
             else if (timeElapsedMS >= MIN_REFRESH_TIME)
             {
-                state.lastTimeExitRefresh = endTime;
+                coinState->lastTimeExitRefresh = endTime;
                 LogInfo("TIME ELAPSED=====\n");
-                cancelAllOrders(&state, &tradeChannel);
-                if (allOrdersCanceled(&state))
+                cancelAllOrders(state, tradeChannel);
+                if (allOrdersCanceled(state))
                 {
                     /* refresh the close order */
-                    real64 mid = state.position.price;
+                    real64 mid = coinState->position.price;
                     LogInfo("Mid is %f\n", mid);
                     real64 buyPrice  = mid * (1 - (SPREAD_PCT / (1 * 100)));
                     real64 sellPrice = mid * (1 + (SPREAD_PCT / (1 * 100)));
                     LogInfo("buy and sell price are %f , %f\n", buyPrice, sellPrice);
                     Order closeOrder = {};
                     closeOrder.timestamp = XgetTimestamp();
-                    closeOrder.side = (state.position.qty > 0) ? SELL : BUY;
+                    closeOrder.side = (coinState->position.qty > 0) ? SELL : BUY;
                     closeOrder.type = LIMIT;
-                    closeOrder.qty = (state.position.qty > 0) ?
-                        fabs(fmin(state.position.qty,
-                                    state.balances->coinBalance->free)) :
-                        fabs(fmin(state.position.qty,
-                                    state.balances->usdtBalance->free));
-                    closeOrder.price = (state.position.qty > 0) ?
+                    closeOrder.qty = (coinState->position.qty > 0) ?
+                        fabs(fmin(coinState->position.qty,
+                                    coinState->balance.free)) :
+                        fabs(fmin(coinState->position.qty,
+                                    state->usdtBalance.free));
+                    closeOrder.price = (coinState->position.qty > 0) ?
                         sellPrice : buyPrice;
                     closeOrder.status = PENDING;
-                    strcpy(closeOrder.coin, state.position.symbol);
+                    strcpy(closeOrder.coin, coinState->position.symbol);
                     char uuidStr[37];
                     generateUUID(uuidStr);
                     strcpy(closeOrder.id, uuidStr);
                     generateUUID(uuidStr);
                     strcpy(closeOrder.reqId, uuidStr);
-                    int res = putOrderInState(&state, closeOrder);
+                    int res = putOrderInState(state, closeOrder);
                     if (res >= 0)
                     {
-                        int res = sendOrder(&closeOrder, &tradeChannel);
+                        int res = sendOrder(&closeOrder, tradeChannel);
                         if (res < 0) LogInfo("couldn't close order \n");
                     }
                 }
@@ -2780,12 +2798,8 @@ main()
 
     fputs("id, Timestamp, symbol, side, price, qty, curr_value, usdt_after_fee, qty_after_fee, pnl\n", outputFile);
     State state = {};
-    StringCpy(state.event, (char *)"");
-    state.isSnapshot = false;
-    state.isPriceTaken = false;
-    state.shouldPlaceOrder = false;
-    state.MarketEventsBuffer.size = MAX_EVENTS;
-    state.MarketEventsBuffer.currentWriteIndex = 0;
+    // StringCpy(state.event, (char *)"");
+    
     state.TradeEventsBuffer.size = MAX_EVENTS;
     state.TradeEventsBuffer.currentWriteIndex = 0;
     state.buyPressure = 0.0;
@@ -2794,17 +2808,11 @@ main()
     state.sellPressureParent = 0.0;
     state.timeToRefresh = 4 * 60 * 60 * 1000;
     state.timeToRefreshParent = 8 * 60 * 60 * 1000;
-    Position position = {};
-    position.symbol = (char *)"SOLUSDT";
     Wallet wallet = {};
     wallet.usdt = 71.62;
     wallet.coin = 16.02;
     state.wallet = wallet;
-    state.position = position;
     state.outputFile = outputFile;
-    timespec endTime;
-    clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
-    state.lastTime = endTime;
     state.currOrderIndex = -1;
     state.SL = STOP_LOSS_PCT;
 
@@ -2818,6 +2826,14 @@ main()
             StringCpy(state.coinStates[i].symbol, symbols[i]);
             state.coinStates[i].balance.free = coinBalances[i];
             state.coinStates[i].isSnapshot = false;
+            state.coinStates[i].MarketEventsBuffer.size = MAX_EVENTS;
+            state.coinStates[i].MarketEventsBuffer.currentWriteIndex = 0;
+            Position position = {};
+            strcpy(position.symbol, state.coinStates[i].symbol);
+            state.coinStates[i].position = position;
+            timespec endTime;
+            clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
+            state.coinStates[i].lastTime = endTime;
         }
     }
 
@@ -2863,7 +2879,7 @@ main()
             ccinfo.address = MARKET_BASE_ENDP;
             ccinfo.port = port;
             // ccinfo.ssl_connection = 1;
-            char path[100];
+            char path[200];
             sprintf(path, "ws/%s@depth", state.coinStates[i].symbol);
             ccinfo.path = path;
             ccinfo.host = ccinfo.address;
@@ -2925,8 +2941,9 @@ main()
     {
         pthread_t mainThreadId;
         MainThreadArgs mainArgs = {
+            .channel = &tradeChannel,
             .context = context,
-            .wsi = lws,
+            .wsi = state.coinStates[i].lws,
             .pss = &pss,
             .index = i,
             .curl = curl
