@@ -26,15 +26,12 @@
 #define MAX_EVENTS 100
 #define MAX_TIME_PERIOD 5 * 60 * 60 * 1000// 5 hours in milliseconds. 
 #define TRADE_FEE 0.1 / 100
-#define SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=SOLUSDT&limit=30"
-#define XRP_SNAPSHOT_URL "https://api.binance.com/api/v3/depth?symbol=XRPUSDT&limit=30"
 #define TRADE_URL "https://api.binance.com/api/v3/order?"
 #define MIN_REFRESH_TIME 5000
-#define MAX_ORDERS 10
+#define MAX_ORDERS 20
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */
 #define SPREAD_PCT 0.5 /* spread . */
 #define STOP_LOSS_PCT 0.1 /* stop loss . */
-#define STEP_SIZE 0.001
 #define POSITION_EPSILON 0.13
 
 typedef uint32_t uint32;
@@ -51,7 +48,7 @@ typedef enum
 
 typedef struct
 {
-    char *symbol;
+    char symbol[100];
     real64 price;
     real64 ltp;
     real64 qty;
@@ -181,6 +178,8 @@ typedef struct timespec timespec;
 typedef struct
 {
     char symbol[100];
+    char capSymbol[100];
+    char snapUrl[4096];
     Balance balance;
     struct lws *lws;
     Snapshot snapshot;
@@ -190,6 +189,8 @@ typedef struct
     Order_book OrderBook;
     char event[4096 * 10];
     real64 startPrice;
+    real64 stepSize;
+    real64 minNotionalQty; /* min qty in accordance with min notional for the coin */
     timespec lastTime;
     timespec lastTimeExitRefresh;
     timespec lastTimeDashboard;
@@ -255,7 +256,6 @@ typedef struct
 
     struct per_session_data__minimal *pss;
     int index;
-    CURL *curl;
 } MainThreadArgs;
 
 
@@ -603,7 +603,7 @@ UpdateOrderFromUserData(
                     coinState->position.price;
 
                 real64 newQty =
-                    floor((oldQty + signedQty) / STEP_SIZE) * STEP_SIZE;
+                    floor((oldQty + signedQty) / coinState->stepSize) * coinState->stepSize;
 
                 /*
                  * Opening / adding to a position.
@@ -842,7 +842,7 @@ UpdateOrderFromBinance(
                 coinState->position.price;
 
             real64 newQty =
-                floor((oldQty + signedQty) / STEP_SIZE) * STEP_SIZE;
+                floor((oldQty + signedQty) / coinState->stepSize) * coinState->stepSize;
 
             /*
              * Opening / adding to a position.
@@ -2164,12 +2164,12 @@ IgnoreAndApplyEvents(Coin_state *state)
 
 
 int
-sendOrder(Order *order, Channel *tradeChannel)
+sendOrder(Order *order, Channel *tradeChannel, Coin_state *coinState)
 {
     char priceStr[32];
     char qtyStr[32];
 
-    order->qty = floor(order->qty / STEP_SIZE) * STEP_SIZE;
+    order->qty = floor(order->qty / coinState->stepSize) * coinState->stepSize;
     snprintf(priceStr, sizeof(priceStr), "%.2f", order->price);
     snprintf(qtyStr, sizeof(qtyStr), "%.3f", order->qty);
     
@@ -2307,11 +2307,12 @@ cancelOrder(Order *order, Channel *tradeChannel)
 }
 
 void
-cancelAllOrders(State *state, Channel *tradeChannel)
+cancelAllOrders(State *state, Channel *tradeChannel, char *coinSymbol)
 {
     for (int i = 0; i < MAX_ORDERS; i++)
     {
         if (0 != strcmp(state->orders[i].id, "") &&
+            0 == strcmp(state->orders[i].coin, coinSymbol) &&
             state->orders[i].status != CANCELLED &&
             state->orders[i].status != REJECTED &&
             state->orders[i].status != COMPLETED)
@@ -2475,24 +2476,25 @@ putOrderInState(State *state, Order order)
 {
     for (int i = 0; i < MAX_ORDERS; i++)
     {
-        if (0 == strcmp(state->orders[i].id, "") ||
-                state->orders[i].status == CANCELLED ||
-                state->orders[i].status == REJECTED ||
-                state->orders[i].status == COMPLETED)
-        {
-            state->orders[i] = order;
-            return 0;
-        }
+            if (0 == strcmp(state->orders[i].id, "") ||
+                    state->orders[i].status == CANCELLED ||
+                    state->orders[i].status == REJECTED ||
+                    state->orders[i].status == COMPLETED)
+            {
+                state->orders[i] = order;
+                return 0;
+            }
     }
     return -1;
 }
 
 bool
-allOrdersCanceled(State *state)
+allOrdersCanceled(State *state, char *coinSymbol)
 {
     for (int i = 0; i < MAX_ORDERS; i++)
     {
-        if (0 != strcmp(state->orders[i].id, ""))
+        if (0 != strcmp(state->orders[i].id, "") &&
+                0 == strcmp(state->orders[i].coin, coinSymbol))
         {
             if (state->orders[i].status == PENDING)
                 return false;
@@ -2504,18 +2506,25 @@ allOrdersCanceled(State *state)
 static void *
 mainThread(void *arg)
 {
+    CURL *curl = curl_easy_init(); // Fresh handle
+    if (curl == NULL)
+    {
+        LogError("curl_easy_init() returned NULL\n");
+        LogInfo("Thread dead=========================== \n");
+        return 0;
+    }
     MainThreadArgs *args = (MainThreadArgs *)arg;
     State *state = args->pss->state;
     int index = args->index;
     Coin_state *coinState = &state->coinStates[index];
-    CURL *curl = args->curl;
     Channel *tradeChannel = args->channel;
     while (1)
     {
+        LogInfo("Thread alive=========================== %d\n", index);
         if (coinState->MarketEventsBuffer.currentWriteIndex > 0 &&
                 !coinState->isSnapshot) {
             // LogInfo("Checking for snapshot...\n");
-            curl_easy_setopt(curl, CURLOPT_URL, SNAPSHOT_URL);
+            curl_easy_setopt(curl, CURLOPT_URL, coinState->snapUrl);
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&coinState->snapshot);
             CURLcode result = curl_easy_perform(curl);
@@ -2550,7 +2559,7 @@ mainThread(void *arg)
                 !coinState->AreEventsApplied)
         {
             SetOrderBook(coinState);
-            // LogInfo("Order book id is %lu\n", state.OrderBook.lastUpdateId);
+            // LogInfo("Order book id is %lu\n", coinState->OrderBook.lastUpdateId);
             // discard/ignore the buffered events where the id < snapshot id
             // apply the buffered events to the order book
             IgnoreAndApplyEvents(coinState);
@@ -2603,7 +2612,7 @@ mainThread(void *arg)
                     );
         }
 
-        LogInfo("state position qty is %f\n", coinState->position.qty);
+        // LogInfo("state position qty is %f\n", coinState->position.qty);
         if (fabs(coinState->position.qty) < POSITION_EPSILON)
         {    
             coinState->position.qty = 0.0;
@@ -2618,8 +2627,8 @@ mainThread(void *arg)
             {
                 coinState->lastTime = endTime;
                 LogInfo("TIME ELAPSED=====\n");
-                cancelAllOrders(state, tradeChannel);
-                if (allOrdersCanceled(state))
+                cancelAllOrders(state, tradeChannel, coinState->capSymbol);
+                if (allOrdersCanceled(state, coinState->capSymbol))
                 {
 
                     // createNewPair(state.orders);
@@ -2634,17 +2643,17 @@ mainThread(void *arg)
                     LogInfo("buy and sell price are %f , %f\n", buyOrder.price, sellOrder.price);
                     buyOrder.timestamp = XgetTimestamp();
                     sellOrder.timestamp = XgetTimestamp();
-                    strcpy(buyOrder.coin, "SOLUSDT");
+                    strcpy(buyOrder.coin, coinState->capSymbol);
                     buyOrder.side = BUY;
                     buyOrder.type = LIMIT;
-                    buyOrder.qty = fmin(0.15,
+                    buyOrder.qty = fmin(coinState->minNotionalQty,
                             state->usdtBalance.free);
                     // buyOrder.price = state.OrderBook.bids[SPREAD_LEVEL].price; 
                     buyOrder.status = PENDING; 
-                    strcpy(sellOrder.coin, "SOLUSDT");
+                    strcpy(sellOrder.coin, coinState->capSymbol);
                     sellOrder.side = SELL;
                     sellOrder.type = LIMIT;
-                    sellOrder.qty = fmin(0.15, coinState->balance.free);
+                    sellOrder.qty = fmin(coinState->minNotionalQty, coinState->balance.free);
                     // sellOrder.price = state.OrderBook.asks[SPREAD_LEVEL].price;
                     sellOrder.status = PENDING; 
                     char uuidStr[37];
@@ -2661,14 +2670,14 @@ mainThread(void *arg)
                     {
                         /* assuming orders will be cancelled and we will have 
                          * slots to fill in state.orders */
-                        int res = sendOrder(&buyOrder, tradeChannel);
+                        int res = sendOrder(&buyOrder, tradeChannel, coinState);
                     }
                     res = putOrderInState(state, sellOrder);
                     if (res >= 0)
                     {
                         /* assuming orders will be cancelled and we will have 
                          * slots to fill in state.orders */
-                        int res = sendOrder(&sellOrder, tradeChannel);
+                        int res = sendOrder(&sellOrder, tradeChannel, coinState);
                     }
                 }
             }
@@ -2693,8 +2702,8 @@ mainThread(void *arg)
             {
                 LogInfo("SL HIT ======\n");
                 /* close the position and cancel all orders */
-                cancelAllOrders(state, tradeChannel);
-                if (allOrdersCanceled(state))
+                cancelAllOrders(state, tradeChannel, coinState->capSymbol);
+                if (allOrdersCanceled(state, coinState->capSymbol))
                 {
                     Order closeOrder = {};
                     closeOrder.timestamp = XgetTimestamp();
@@ -2706,7 +2715,7 @@ mainThread(void *arg)
                         fabs(fmin(coinState->position.qty,
                                     state->usdtBalance.free));
                     closeOrder.status = PENDING;
-                    strcpy(closeOrder.coin, coinState->position.symbol);
+                    strcpy(closeOrder.coin, coinState->capSymbol);
                     char uuidStr[37];
                     generateUUID(uuidStr);
                     strcpy(closeOrder.id, uuidStr);
@@ -2715,7 +2724,7 @@ mainThread(void *arg)
                     int res = putOrderInState(state, closeOrder);
                     if (res >= 0)
                     {
-                        int res = sendOrder(&closeOrder, tradeChannel);
+                        int res = sendOrder(&closeOrder, tradeChannel, coinState);
                         if (res < 0) LogInfo("couldn't close order \n");
                     }
                     /*TODO(Akhil): this is a fix, i just want it to start quoting again */
@@ -2726,8 +2735,8 @@ mainThread(void *arg)
             {
                 coinState->lastTimeExitRefresh = endTime;
                 LogInfo("TIME ELAPSED=====\n");
-                cancelAllOrders(state, tradeChannel);
-                if (allOrdersCanceled(state))
+                cancelAllOrders(state, tradeChannel, coinState->capSymbol);
+                if (allOrdersCanceled(state, coinState->capSymbol))
                 {
                     /* refresh the close order */
                     real64 mid = coinState->position.price;
@@ -2747,7 +2756,7 @@ mainThread(void *arg)
                     closeOrder.price = (coinState->position.qty > 0) ?
                         sellPrice : buyPrice;
                     closeOrder.status = PENDING;
-                    strcpy(closeOrder.coin, coinState->position.symbol);
+                    strcpy(closeOrder.coin, coinState->capSymbol);
                     char uuidStr[37];
                     generateUUID(uuidStr);
                     strcpy(closeOrder.id, uuidStr);
@@ -2756,7 +2765,7 @@ mainThread(void *arg)
                     int res = putOrderInState(state, closeOrder);
                     if (res >= 0)
                     {
-                        int res = sendOrder(&closeOrder, tradeChannel);
+                        int res = sendOrder(&closeOrder, tradeChannel, coinState);
                         if (res < 0) LogInfo("couldn't close order \n");
                     }
                 }
@@ -2764,6 +2773,8 @@ mainThread(void *arg)
         }
 
     }
+    curl_easy_cleanup(curl);
+    return 0;
 }
 
 
@@ -2773,18 +2784,6 @@ main()
     LogInit(LOG_INFO);
     Channel tradeChannel;
     ChannelInit(&tradeChannel);
-    CURLcode res = curl_global_init(CURL_GLOBAL_ALL);
-    if (res != CURLE_OK) {
-        LogInfo("curl setup failed, abort!");
-        return -1;
-    }
-
-    CURL *curl = curl_easy_init(); // Fresh handle
-    if (curl == NULL)
-    {
-        LogError("curl_easy_init() returned NULL\n");
-        return -1;
-    }
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     
@@ -2817,28 +2816,36 @@ main()
     state.SL = STOP_LOSS_PCT;
 
     char symbols[MAX_COINS][100] = {"solusdt", "xrpusdt"};
-    real64 coinBalances[MAX_COINS] = {0.289, 0};
+    char urls[MAX_COINS][100] = {"SOLUSDT", "XRPUSDT"};
+    real64 coinBalances[MAX_COINS] = {0.287, 5.994};
+    real64 stepSizes[MAX_COINS] = {0.001, 0.1};
+    real64 minNotionalQtys[MAX_COINS] = {0.15, 6};
 
     for (int i = 0; i < MAX_COINS; i++)
     {
-        if (0 != strcmp(state.coinStates[i].symbol, ""))
-        {
-            StringCpy(state.coinStates[i].symbol, symbols[i]);
-            state.coinStates[i].balance.free = coinBalances[i];
-            state.coinStates[i].isSnapshot = false;
-            state.coinStates[i].MarketEventsBuffer.size = MAX_EVENTS;
-            state.coinStates[i].MarketEventsBuffer.currentWriteIndex = 0;
-            Position position = {};
-            strcpy(position.symbol, state.coinStates[i].symbol);
-            state.coinStates[i].position = position;
-            timespec endTime;
-            clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
-            state.coinStates[i].lastTime = endTime;
-        }
+        StringCpy(state.coinStates[i].symbol, symbols[i]);
+        StringCpy(state.coinStates[i].capSymbol, urls[i]);
+        sprintf(state.coinStates[i].snapUrl,
+                "https://api.binance.com/api/v3/depth?symbol=%s&limit=30",
+                urls[i]);
+        state.coinStates[i].balance.free = coinBalances[i];
+        state.coinStates[i].stepSize = stepSizes[i];
+        state.coinStates[i].minNotionalQty = minNotionalQtys[i];
+        state.coinStates[i].isSnapshot = false;
+        state.coinStates[i].MarketEventsBuffer.size = MAX_EVENTS;
+        state.coinStates[i].MarketEventsBuffer.currentWriteIndex = 0;
+        Position position = {};
+        strcpy(position.symbol, state.coinStates[i].symbol);
+        state.coinStates[i].position = position;
+        timespec endTime;
+        clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
+        state.coinStates[i].lastTime = endTime;
+        state.coinStates[i].lastTimeDashboard = endTime;
+        state.coinStates[i].lastTimeExitRefresh = endTime;
     }
 
     Balance usdtBalance = {};
-    usdtBalance.free = 145.41;
+    usdtBalance.free = 137.11;
     state.usdtBalance = usdtBalance;
     // lws_set_log_level(
     //     LLL_ERR |
@@ -2887,7 +2894,7 @@ main()
             ccinfo.ssl_connection = LCCSCF_USE_SSL;
             ccinfo.ietf_version_or_minus_one = -1;
             ccinfo.protocol = "binance";
-            ccinfo.userdata = (void *)&state;
+            ccinfo.userdata = (void *)&state.coinStates[i];
             struct lws *lws = lws_client_connect_via_info(&ccinfo);
             if (lws == NULL)
             {
@@ -2937,25 +2944,43 @@ main()
         &tradeArgs
     ); 
 
+    pthread_t mainThreadIds[MAX_COINS];
+    MainThreadArgs mainArgs[MAX_COINS];
+
     for (int i = 0; i < MAX_COINS; i++)
     {
-        pthread_t mainThreadId;
-        MainThreadArgs mainArgs = {
-            .channel = &tradeChannel,
-            .context = context,
-            .wsi = state.coinStates[i].lws,
-            .pss = &pss,
-            .index = i,
-            .curl = curl
-        };
-        pthread_create(
-                &mainThreadId,
-                NULL,
-                mainThread,
-                &mainArgs
-                );
+        if (0 != strcmp(state.coinStates[i].symbol, ""))
+        {
+            mainArgs[i] = (MainThreadArgs) {
+                .channel = &tradeChannel,
+                .context = context,
+                .wsi = state.coinStates[i].lws,
+                .pss = &pss,
+                .index = i
+            };
+
+            int rc = pthread_create(
+                    &mainThreadIds[i],
+                    NULL,
+                    mainThread,
+                    &mainArgs[i]
+                    );
+
+            if (rc != 0) {
+                fprintf(stderr, "pthread_create failed for coin %d: %s\n",
+                        i, strerror(rc));
+            }
+        }
     }
 
+    /* wait for the threads to finish */
+    for (int i = 0; i < MAX_COINS; i++)
+    {
+        if (0 != strcmp(state.coinStates[i].symbol, ""))
+        {
+            pthread_join(mainThreadIds[i], NULL);
+        }
+    }
     // curl_easy_cleanup(curl);
     // lws_context_destroy(context);
     return 0;
