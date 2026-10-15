@@ -546,7 +546,7 @@ UpdateOrderFromUserData(
                 Coin_state *coinState;
                 for (int i = 0; i < MAX_COINS; i++)
                 {
-                    if (0 == strcmp(state->coinStates[i].symbol, order->coin))
+                    if (0 == strcmp(state->coinStates[i].capSymbol, order->coin))
                     {
                         coinState = &state->coinStates[i];
                         break;
@@ -776,7 +776,7 @@ UpdateOrderFromBinance(
             Coin_state *coinState;
             for (int i = 0; i < MAX_COINS; i++)
             {
-                if (0 == strcmp(state->coinStates[i].symbol, order->coin))
+                if (0 == strcmp(state->coinStates[i].capSymbol, order->coin))
                 {
                     coinState = &state->coinStates[i];
                     break;
@@ -1012,7 +1012,7 @@ handleTradeSocketResponse(
                     {
                         for (int i = 0; i < MAX_COINS; i++)
                         {
-                            if (0 == strcmp(pss->state->coinStates[i].symbol, assetName))
+                            if (0 == strcmp(pss->state->coinStates[i].capSymbol, assetName))
                             {
                                 pss->state->coinStates[i].balance.free = strtod(freeStr, NULL);
                                 pss->state->coinStates[i].balance.lock = strtod(lockedStr, NULL);
@@ -2835,7 +2835,7 @@ main()
         state.coinStates[i].MarketEventsBuffer.size = MAX_EVENTS;
         state.coinStates[i].MarketEventsBuffer.currentWriteIndex = 0;
         Position position = {};
-        strcpy(position.symbol, state.coinStates[i].symbol);
+        strcpy(position.symbol, state.coinStates[i].capSymbol);
         state.coinStates[i].position = position;
         timespec endTime;
         clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
