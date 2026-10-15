@@ -2817,7 +2817,7 @@ main()
 
     char symbols[MAX_COINS][100] = {"solusdt", "xrpusdt"};
     char urls[MAX_COINS][100] = {"SOLUSDT", "XRPUSDT"};
-    real64 coinBalances[MAX_COINS] = {0.287, 5.994};
+    real64 coinBalances[MAX_COINS] = {0.287, 5.089};
     real64 stepSizes[MAX_COINS] = {0.001, 0.1};
     real64 minNotionalQtys[MAX_COINS] = {0.15, 6};
 
@@ -2845,7 +2845,7 @@ main()
     }
 
     Balance usdtBalance = {};
-    usdtBalance.free = 137.11;
+    usdtBalance.free = 138.26;
     state.usdtBalance = usdtBalance;
     // lws_set_log_level(
     //     LLL_ERR |
