@@ -30,6 +30,9 @@ ChannelPut(Channel *channel, void *data)
 
     if (nextIndex == channel->takeIndex)
     {
+        printf("FULL: putIndex=%d takeIndex=%d\n",
+                channel->putIndex,
+                channel->takeIndex);
         printf("Buffer full, can't put!\n");
 
         pthread_mutex_unlock(&channel->mutex);
@@ -67,6 +70,9 @@ ChannelTake(Channel *channel)
      * IMPORTANT:
      * Read the current slot BEFORE advancing takeIndex.
      */
+    printf("TAKE: write=%d read=%d\n",
+        channel->putIndex,
+        channel->takeIndex);
     void *data =
         channel->buffer[channel->takeIndex].data;
 

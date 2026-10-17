@@ -1263,6 +1263,8 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                 // 4. Perform the SINGLE allowed lws_write() call for this callback event
                 // Note: lws_write expects the pointer to start AFTER the LWS_PRE padding
                 int n = lws_write(wsi, &pss->buffer[LWS_PRE + pss->ptr], chunk_size, LWS_WRITE_TEXT);
+                LogInfo("WRITE RESULT: n=%d len=%zu ptr=%zu\n",
+                        n, pss->len, pss->ptr);
 
                 if (n < 0) {
                     lwsl_err("ERROR %d writing to ws socket\n", n);
@@ -1281,6 +1283,7 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                     // Clean up buffer memory if sending is completely finished
                     free(pss->buffer);
                     pss->buffer = NULL;
+                    LogInfo("MESSAGE SENT; BUFFER CLEARED\n");
                 }
                 break;
             }
@@ -2362,6 +2365,9 @@ tradeThread(void *arg)
 
     while (1)
     {
+        if (args->pss->buffer != NULL)
+            LogInfo("WAITING FOR WRITEABLE: len=%zu ptr=%zu\n",
+                    args->pss->len, args->pss->ptr);
         /*
          * Only take a new message if pss isn't
          * already holding one.
