@@ -611,6 +611,7 @@ UpdateOrderFromUserData(
                 if (oldQty == 0.0)
                 {
                     coinState->position.price = executionPrice;
+                    coinState->position.rpnl = 0;
                 }
                 else if (
                         (oldQty > 0.0 && signedQty > 0.0) ||
@@ -635,6 +636,11 @@ UpdateOrderFromUserData(
                      * Fully closed.
                      */
                     coinState->position.price = 0.0;
+                    /* realised pnl */
+                    real64 oldAmount = (signedQty * executionPrice);
+                    real64 newAmount = (oldQty * oldPrice);
+                    real64 totalFees = (0.1/100) * (oldAmount + newAmount);
+                    coinState->position.rpnl =  newAmount + oldAmount - totalFees;
                 }
 
                 coinState->position.qty =
@@ -643,10 +649,21 @@ UpdateOrderFromUserData(
                 coinState->position.ltp =
                     executionPrice;
 
-                /* realised pnl */
-                coinState->position.rpnl = (signedQty * executionPrice) + (oldQty * oldPrice);
                 coinState->position.timestamp =
                     order->timestamp;
+
+                /* write to csv */
+                FILE *fp = fopen("trades.csv", "w");
+                if (fp == NULL) {
+                    printf("Error opening file!\n");
+                    return;
+                }
+                fprintf(fp, "%s, %f, %f, %f\n",
+                        OrderSideString[order->side],
+                        order->price,
+                        order->qty,
+                        coinState->position.rpnl);
+                fclose(fp);
             }
         }
         else if (
@@ -850,6 +867,7 @@ UpdateOrderFromBinance(
             if (oldQty == 0.0)
             {
                 coinState->position.price = executionPrice;
+                coinState->position.rpnl = 0;
             }
             else if (
                     (oldQty > 0.0 && signedQty > 0.0) ||
@@ -874,6 +892,11 @@ UpdateOrderFromBinance(
                  * Fully closed.
                  */
                 coinState->position.price = 0.0;
+                /* realised pnl */
+                real64 oldAmount = (signedQty * executionPrice);
+                real64 newAmount = (oldQty * oldPrice);
+                real64 totalFees = (0.1/100) * (oldAmount + newAmount);
+                coinState->position.rpnl =  newAmount + oldAmount - totalFees;
             }
 
             coinState->position.qty =
@@ -882,10 +905,20 @@ UpdateOrderFromBinance(
             coinState->position.ltp =
                 executionPrice;
 
-            /* realised pnl */
-            coinState->position.rpnl = (signedQty * executionPrice) + (oldQty * oldPrice);
             coinState->position.timestamp =
                 order->timestamp;
+            /* write to csv */
+            FILE *fp = fopen("trades.csv", "w");
+            if (fp == NULL) {
+                printf("Error opening file!\n");
+                return;
+            }
+            fprintf(fp, "%s, %f, %f, %f\n",
+                    OrderSideString[order->side],
+                    order->price,
+                    order->qty,
+                    coinState->position.rpnl);
+            fclose(fp);
             }
         }
         else if (strcmp(binanceStatus, "CANCELED") == 0 ||
