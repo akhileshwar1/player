@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <pthread.h>
 
-#define CHANNEL_LENGTH 2000
+#define CHANNEL_LENGTH 3000
 
 typedef struct
 {

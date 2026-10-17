@@ -30,7 +30,7 @@
 #define MIN_REFRESH_TIME 5000
 #define MAX_ORDERS 20
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */
-#define STOP_LOSS_PCT 0.1 /* stop loss . */
+#define STOP_LOSS_PCT 0.3 /* stop loss . */
 #define POSITION_EPSILON 0.13
 
 typedef uint32_t uint32;
@@ -2820,7 +2820,7 @@ main()
     real64 coinBalances[MAX_COINS] = {0.287, 15.743};
     real64 stepSizes[MAX_COINS] = {0.001, 0.1};
     real64 minNotionalQtys[MAX_COINS] = {0.15, 6};
-    real64 spreads[MAX_COINS] = {0.5, 4};
+    real64 spreads[MAX_COINS] = {2, 4};
 
     for (int i = 0; i < MAX_COINS; i++)
     {
