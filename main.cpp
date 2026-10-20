@@ -27,8 +27,8 @@
 #define MAX_TIME_PERIOD 5 * 60 * 60 * 1000// 5 hours in milliseconds. 
 #define TRADE_FEE 0.1 / 100
 #define TRADE_URL "https://api.binance.com/api/v3/order?"
-#define MIN_REFRESH_TIME 5000
-#define MAX_ORDERS 20
+#define MIN_REFRESH_TIME 10000
+#define MAX_ORDERS 30
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */
 #define STOP_LOSS_PCT 0.3 /* stop loss . */
 #define POSITION_EPSILON 0.13
@@ -2207,7 +2207,7 @@ sendOrder(Order *order, Channel *tradeChannel, Coin_state *coinState)
 
     order->qty = floor(order->qty / coinState->stepSize) * coinState->stepSize;
     snprintf(priceStr, sizeof(priceStr), "%.2f", order->price);
-    snprintf(qtyStr, sizeof(qtyStr), "%.3f", order->qty);
+    snprintf(qtyStr, sizeof(qtyStr), "%.7f", order->qty);
     
     /* send the order through wsi instance */
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
@@ -2854,12 +2854,12 @@ main()
     state.currOrderIndex = -1;
     state.SL = STOP_LOSS_PCT;
 
-    char symbols[MAX_COINS][100] = {"solusdt", "xrpusdt"};
-    char urls[MAX_COINS][100] = {"SOLUSDT", "XRPUSDT"};
-    real64 coinBalances[MAX_COINS] = {0.287, 15.743};
-    real64 stepSizes[MAX_COINS] = {0.001, 0.1};
-    real64 minNotionalQtys[MAX_COINS] = {0.15, 6};
-    real64 spreads[MAX_COINS] = {2, 4};
+    char symbols[MAX_COINS][100] = {"solusdt", "ethusdt", "btcusdt"};
+    char urls[MAX_COINS][100] = {"SOLUSDT", "ETHUSDT", "BTCUSDT"};
+    real64 coinBalances[MAX_COINS] = {0.137, 0.0039, 0.000329};
+    real64 stepSizes[MAX_COINS] = {0.001, 0.0001, 0.00001};
+    real64 minNotionalQtys[MAX_COINS] = {0.15, 0.003, 0.00008};
+    real64 spreads[MAX_COINS] = {2, 0.1, 0.005};
 
     for (int i = 0; i < MAX_COINS; i++)
     {
@@ -2886,7 +2886,7 @@ main()
     }
 
     Balance usdtBalance = {};
-    usdtBalance.free = 123.85;
+    usdtBalance.free = 102.85;
     state.usdtBalance = usdtBalance;
     // lws_set_log_level(
     //     LLL_ERR |
