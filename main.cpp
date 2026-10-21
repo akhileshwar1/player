@@ -27,7 +27,7 @@
 #define MAX_TIME_PERIOD 5 * 60 * 60 * 1000// 5 hours in milliseconds. 
 #define TRADE_FEE 0.1 / 100
 #define TRADE_URL "https://api.binance.com/api/v3/order?"
-#define MIN_REFRESH_TIME 3 * 60 * 60 * 1000
+#define MIN_REFRESH_TIME (3 * 60 * 60 * 1000)
 #define MAX_ORDERS 30
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */
 #define STOP_LOSS_PCT 0.3 /* stop loss . */
@@ -2661,7 +2661,7 @@ mainThread(void *arg)
                     coinState->lastTime,
                     endTime
                     );
-            // LogInfo("time elapsed is %f\n", timeElapsedMS);
+            LogInfo("time elapsed is %f\n", timeElapsedMS);
             if (timeElapsedMS >= MIN_REFRESH_TIME)
             {
                 coinState->lastTime = endTime;
@@ -2882,7 +2882,7 @@ main()
         clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
         state.coinStates[i].lastTimeDashboard = endTime;
         state.coinStates[i].lastTimeExitRefresh = endTime;
-        endTime.tv_sec -= 3 * 60 * 60; // so that we start quoting asap the first time.
+        endTime.tv_sec -= 3 * 58 * 60; // so that we start quoting asap the first time.
         state.coinStates[i].lastTime = endTime;
     }
 
