@@ -27,7 +27,7 @@
 #define MAX_TIME_PERIOD 5 * 60 * 60 * 1000// 5 hours in milliseconds. 
 #define TRADE_FEE 0.1 / 100
 #define TRADE_URL "https://api.binance.com/api/v3/order?"
-#define MIN_REFRESH_TIME 30000
+#define MIN_REFRESH_TIME 3 * 60 * 60 * 1000
 #define MAX_ORDERS 30
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */
 #define STOP_LOSS_PCT 0.3 /* stop loss . */
