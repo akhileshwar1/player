@@ -2764,7 +2764,16 @@ mainThread(void *arg)
                     if (res >= 0)
                     {
                         int res = sendOrder(&closeOrder, tradeChannel, coinState);
-                        if (res < 0) LogInfo("couldn't close order \n");
+                        if (res < 0)
+                        {
+                            LogInfo("couldn't close order \n");
+                        }
+                        else
+                        {
+                            endTime.tv_sec -= 3 * 59 * 60; // so that we start requoting asap.
+                            coinState->lastTime = endTime;
+                            coinState->lastTimeExitRefresh = endTime;
+                        }
                     }
                     /*TODO(Akhil): this is a fix, i just want it to start quoting again */
                     // state.position.qty = 0;
@@ -2805,7 +2814,16 @@ mainThread(void *arg)
                     if (res >= 0)
                     {
                         int res = sendOrder(&closeOrder, tradeChannel, coinState);
-                        if (res < 0) LogInfo("couldn't close order \n");
+                        if (res < 0)
+                        {
+                            LogInfo("couldn't close order \n");
+                        }
+                        else
+                        {
+                            endTime.tv_sec -= 3 * 59 * 60; // so that we start requoting asap.
+                            coinState->lastTime = endTime;
+                            coinState->lastTimeExitRefresh = endTime;
+                        } 
                     }
                 }
             }
@@ -2856,7 +2874,7 @@ main()
 
     char symbols[MAX_COINS][100] = {"solusdt", "ethusdt", "btcusdt"};
     char urls[MAX_COINS][100] = {"SOLUSDT", "ETHUSDT", "BTCUSDT"};
-    real64 coinBalances[MAX_COINS] = {0.137, 0.00099, 0.0000889};
+    real64 coinBalances[MAX_COINS] = {0.137, 0.00399, 0.0000889};
     real64 stepSizes[MAX_COINS] = {0.001, 0.0001, 0.00001};
     real64 minNotionalQtys[MAX_COINS] = {0.15, 0.003, 0.00008};
     real64 spreads[MAX_COINS] = {1, 1, 1};
@@ -2881,13 +2899,13 @@ main()
         timespec endTime;
         clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
         state.coinStates[i].lastTimeDashboard = endTime;
-        state.coinStates[i].lastTimeExitRefresh = endTime;
-        endTime.tv_sec -= 3 * 58 * 60; // so that we start quoting asap the first time.
+        endTime.tv_sec -= 3 * 59 * 60; // so that we start quoting asap the first time.
         state.coinStates[i].lastTime = endTime;
+        state.coinStates[i].lastTimeExitRefresh = endTime;
     }
 
     Balance usdtBalance = {};
-    usdtBalance.free = 129.50;
+    usdtBalance.free = 121.82;
     state.usdtBalance = usdtBalance;
     // lws_set_log_level(
     //     LLL_ERR |
