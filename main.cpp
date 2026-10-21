@@ -27,7 +27,7 @@
 #define MAX_TIME_PERIOD 5 * 60 * 60 * 1000// 5 hours in milliseconds. 
 #define TRADE_FEE 0.1 / 100
 #define TRADE_URL "https://api.binance.com/api/v3/order?"
-#define MIN_REFRESH_TIME 10000
+#define MIN_REFRESH_TIME 30000
 #define MAX_ORDERS 30
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */
 #define STOP_LOSS_PCT 0.3 /* stop loss . */
@@ -2859,7 +2859,7 @@ main()
     real64 coinBalances[MAX_COINS] = {0.137, 0.00099, 0.0000889};
     real64 stepSizes[MAX_COINS] = {0.001, 0.0001, 0.00001};
     real64 minNotionalQtys[MAX_COINS] = {0.15, 0.003, 0.00008};
-    real64 spreads[MAX_COINS] = {2, 2, 2};
+    real64 spreads[MAX_COINS] = {1, 1, 1};
 
     for (int i = 0; i < MAX_COINS; i++)
     {
