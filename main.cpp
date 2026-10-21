@@ -2880,9 +2880,10 @@ main()
         state.coinStates[i].position = position;
         timespec endTime;
         clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
-        state.coinStates[i].lastTime = endTime;
         state.coinStates[i].lastTimeDashboard = endTime;
         state.coinStates[i].lastTimeExitRefresh = endTime;
+        endTime.tv_sec -= 3 * 60 * 60; // so that we start quoting asap the first time.
+        state.coinStates[i].lastTime = endTime;
     }
 
     Balance usdtBalance = {};
