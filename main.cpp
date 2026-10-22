@@ -653,7 +653,7 @@ UpdateOrderFromUserData(
                     order->timestamp;
 
                 /* write to csv */
-                FILE *fp = fopen("trades.csv", "w");
+                FILE *fp = fopen("trades.csv", "wa");
                 if (fp == NULL) {
                     printf("Error opening file!\n");
                     return;
@@ -908,7 +908,7 @@ UpdateOrderFromBinance(
             coinState->position.timestamp =
                 order->timestamp;
             /* write to csv */
-            FILE *fp = fopen("trades.csv", "w");
+            FILE *fp = fopen("trades.csv", "wa");
             if (fp == NULL) {
                 printf("Error opening file!\n");
                 return;
