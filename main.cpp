@@ -2664,12 +2664,11 @@ mainThread(void *arg)
             LogInfo("time elapsed is %f\n", timeElapsedMS);
             if (timeElapsedMS >= MIN_REFRESH_TIME)
             {
-                coinState->lastTime = endTime;
                 LogInfo("TIME ELAPSED=====\n");
                 cancelAllOrders(state, tradeChannel, coinState->capSymbol);
                 if (allOrdersCanceled(state, coinState->capSymbol))
                 {
-
+                    coinState->lastTime = endTime;
                     // createNewPair(state.orders);
                     real64 mid =
                         (coinState->OrderBook.bids[0].price +
@@ -2781,11 +2780,11 @@ mainThread(void *arg)
             }
             else if (timeElapsedMS >= MIN_REFRESH_TIME)
             {
-                coinState->lastTimeExitRefresh = endTime;
                 LogInfo("TIME ELAPSED=====\n");
                 cancelAllOrders(state, tradeChannel, coinState->capSymbol);
                 if (allOrdersCanceled(state, coinState->capSymbol))
                 {
+                    coinState->lastTimeExitRefresh = endTime;
                     /* refresh the close order */
                     real64 mid = coinState->position.price;
                     LogInfo("Mid is %f\n", mid);
@@ -2823,7 +2822,7 @@ mainThread(void *arg)
                             endTime.tv_sec -= 3 * 59 * 60; // so that we start requoting asap.
                             coinState->lastTime = endTime;
                             coinState->lastTimeExitRefresh = endTime;
-                        } 
+                        }
                     }
                 }
             }
