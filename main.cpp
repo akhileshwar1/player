@@ -31,7 +31,7 @@
 #define MAX_ORDERS 30
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */
 #define STOP_LOSS_PCT 0.3 /* stop loss . */
-#define POSITION_EPSILON 0.13
+#define POSITION_EPSILON 0.00000000001
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
@@ -2873,7 +2873,7 @@ main()
 
     char symbols[MAX_COINS][100] = {"solusdt", "ethusdt", "btcusdt"};
     char urls[MAX_COINS][100] = {"SOLUSDT", "ETHUSDT", "BTCUSDT"};
-    real64 coinBalances[MAX_COINS] = {0.188, 0.00998, 0.0002463};
+    real64 coinBalances[MAX_COINS] = {0.188, 0.01298, 0.0003285};
     real64 stepSizes[MAX_COINS] = {0.001, 0.0001, 0.00001};
     real64 minNotionalQtys[MAX_COINS] = {0.15, 0.003, 0.00008};
     real64 spreads[MAX_COINS] = {1.5, 1.5, 1.5};
