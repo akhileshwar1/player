@@ -2771,7 +2771,7 @@ mainThread(void *arg)
                         {
                             endTime.tv_sec -= 3 * 59 * 60; // so that we start requoting asap.
                             coinState->lastTime = endTime;
-                            coinState->lastTimeExitRefresh = endTime;
+                            // coinState->lastTimeExitRefresh = endTime;
                         }
                     }
                     /*TODO(Akhil): this is a fix, i just want it to start quoting again */
@@ -2821,7 +2821,7 @@ mainThread(void *arg)
                         {
                             endTime.tv_sec -= 3 * 59 * 60; // so that we start requoting asap.
                             coinState->lastTime = endTime;
-                            coinState->lastTimeExitRefresh = endTime;
+                            // coinState->lastTimeExitRefresh = endTime;
                         }
                     }
                 }
