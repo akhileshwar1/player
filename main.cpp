@@ -31,7 +31,7 @@
 #define MAX_ORDERS 30
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */
 #define STOP_LOSS_PCT 0.3 /* stop loss . */
-#define POSITION_EPSILON 0.00000000001
+#define SPREAD_PCT 1.5 /* spread in percentage. */
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
@@ -189,7 +189,7 @@ typedef struct
     char event[4096 * 10];
     real64 startPrice;
     real64 stepSize;
-    real64 spreadPct;
+    real64 epsilon; /* position epsilon */
     real64 minNotionalQty; /* min qty in accordance with min notional for the coin */
     timespec lastTime;
     timespec lastTimeExitRefresh;
@@ -2652,7 +2652,7 @@ mainThread(void *arg)
         }
 
         // LogInfo("state position qty is %f\n", coinState->position.qty);
-        if (fabs(coinState->position.qty) < POSITION_EPSILON)
+        if (fabs(coinState->position.qty) < coinState->epsilon)
         {    
             coinState->position.qty = 0.0;
             /* check if refresh and
@@ -2676,8 +2676,8 @@ mainThread(void *arg)
                     LogInfo("Mid is %f\n", mid);
                     Order buyOrder = {};
                     Order sellOrder = {};
-                    buyOrder.price  = mid * (1 - (coinState->spreadPct / (2 * 100)));
-                    sellOrder.price = mid * (1 + (coinState->spreadPct / (2 * 100)));
+                    buyOrder.price  = mid * (1 - (SPREAD_PCT / (2 * 100)));
+                    sellOrder.price = mid * (1 + (SPREAD_PCT / (2 * 100)));
                     LogInfo("buy and sell price are %f , %f\n", buyOrder.price, sellOrder.price);
                     buyOrder.timestamp = XgetTimestamp();
                     sellOrder.timestamp = XgetTimestamp();
@@ -2788,8 +2788,8 @@ mainThread(void *arg)
                     /* refresh the close order */
                     real64 mid = coinState->position.price;
                     LogInfo("Mid is %f\n", mid);
-                    real64 buyPrice  = mid * (1 - (coinState->spreadPct / (1 * 100)));
-                    real64 sellPrice = mid * (1 + (coinState->spreadPct / (1 * 100)));
+                    real64 buyPrice  = mid * (1 - (SPREAD_PCT / (1 * 100)));
+                    real64 sellPrice = mid * (1 + (SPREAD_PCT / (1 * 100)));
                     LogInfo("buy and sell price are %f , %f\n", buyPrice, sellPrice);
                     Order closeOrder = {};
                     closeOrder.timestamp = XgetTimestamp();
@@ -2876,7 +2876,7 @@ main()
     real64 coinBalances[MAX_COINS] = {0.188, 0.01298, 0.0003285};
     real64 stepSizes[MAX_COINS] = {0.001, 0.0001, 0.00001};
     real64 minNotionalQtys[MAX_COINS] = {0.15, 0.003, 0.00008};
-    real64 spreads[MAX_COINS] = {1.5, 1.5, 1.5};
+    real64 epsilons[MAX_COINS] = {0.13, 0.0005, 0.000005};
 
     for (int i = 0; i < MAX_COINS; i++)
     {
@@ -2887,7 +2887,7 @@ main()
                 urls[i]);
         state.coinStates[i].balance.free = coinBalances[i];
         state.coinStates[i].stepSize = stepSizes[i];
-        state.coinStates[i].spreadPct = spreads[i];
+        state.coinStates[i].epsilon = epsilons[i];
         state.coinStates[i].minNotionalQty = minNotionalQtys[i];
         state.coinStates[i].isSnapshot = false;
         state.coinStates[i].MarketEventsBuffer.size = MAX_EVENTS;
