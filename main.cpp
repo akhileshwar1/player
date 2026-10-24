@@ -30,8 +30,8 @@
 #define MIN_REFRESH_TIME (3 * 60 * 60 * 1000)
 #define MAX_ORDERS 30
 #define SPREAD_LEVEL 20 /* nth level on asks and bids is the spread. */
-#define STOP_LOSS_PCT 0.4 /* stop loss . */
-#define SPREAD_PCT 1.5 /* spread in percentage. */
+#define STOP_LOSS_PCT 0.3 /* stop loss . */
+#define SPREAD_PCT 3.0 /* spread in percentage. */
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
