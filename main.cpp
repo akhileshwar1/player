@@ -2769,7 +2769,7 @@ mainThread(void *arg)
                         }
                         else
                         {
-                            endTime.tv_sec -= 3 * 59 * 60; // so that we start requoting asap.
+                            endTime.tv_sec -= 3 * 60 * 60; // so that we start requoting asap.
                             coinState->lastTime = endTime;
                             // coinState->lastTimeExitRefresh = endTime;
                         }
@@ -2819,7 +2819,7 @@ mainThread(void *arg)
                         }
                         else
                         {
-                            endTime.tv_sec -= 3 * 59 * 60; // so that we start requoting asap.
+                            endTime.tv_sec -= 3 * 60 * 60; // so that we start requoting asap.
                             coinState->lastTime = endTime;
                             // coinState->lastTimeExitRefresh = endTime;
                         }
