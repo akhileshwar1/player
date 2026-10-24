@@ -2873,7 +2873,7 @@ main()
 
     char symbols[MAX_COINS][100] = {"solusdt", "ethusdt", "btcusdt"};
     char urls[MAX_COINS][100] = {"SOLUSDT", "ETHUSDT", "BTCUSDT"};
-    real64 coinBalances[MAX_COINS] = {0.052, 0.01298, 0.0003285};
+    real64 coinBalances[MAX_COINS] = {0.149, 0.01298, 0.0003285};
     real64 stepSizes[MAX_COINS] = {0.001, 0.0001, 0.00001};
     real64 minNotionalQtys[MAX_COINS] = {0.15, 0.003, 0.00008};
     real64 epsilons[MAX_COINS] = {0.13, 0.0005, 0.000005};
@@ -2904,7 +2904,7 @@ main()
     }
 
     Balance usdtBalance = {};
-    usdtBalance.free = 87.634;
+    usdtBalance.free = 77.31;
     state.usdtBalance = usdtBalance;
     // lws_set_log_level(
     //     LLL_ERR |
