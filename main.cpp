@@ -2736,7 +2736,7 @@ mainThread(void *arg)
             LogInfo("time elapsed is %f=====\n", timeElapsedMS);
             if (coinState->position.upnl < 0 &&
                     fabs(coinState->position.upnl) >=
-                    (coinState->position.price * coinState->position.qty * (state->SL / 100)))
+                    (coinState->position.price * fabs(coinState->position.qty) * (state->SL / 100)))
             {
                 LogInfo("SL HIT ======\n");
                 /* close the position and cancel all orders */
