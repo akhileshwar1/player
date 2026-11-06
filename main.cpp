@@ -2903,7 +2903,7 @@ main()
     }
 
     Balance usdtBalance = {};
-    usdtBalance.free = 77.31;
+    usdtBalance.free = 55.17;
     state.usdtBalance = usdtBalance;
     // lws_set_log_level(
     //     LLL_ERR |
