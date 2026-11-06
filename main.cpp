@@ -1228,7 +1228,13 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                     yyjson_mut_write(doc, 0, NULL);
 
                 LogInfo("User data subscribe: %s", json);
-
+                if (!ChannelPut(pss->channel, json))
+                {
+                    LogError("Trade channel full; dropping subscribe message");
+                    free(json);
+                    yyjson_mut_doc_free(doc);
+                    return -1;
+                }
                 // free(json);
                 yyjson_mut_doc_free(doc);
 
