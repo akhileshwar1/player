@@ -236,6 +236,7 @@ struct per_session_data__minimal {
     size_t ptr;           // Current read position in the buffer
     State *state;
     Channel *channel;
+    timespec lastTime;
 };
 
 typedef struct
@@ -2364,14 +2365,36 @@ tradeThread(void *arg)
 
     while (1)
     {
+        timespec endTime;
+        clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
         if (args->pss->buffer != NULL)
-            LogInfo("WAITING FOR WRITEABLE: len=%zu ptr=%zu\n",
-                    args->pss->len, args->pss->ptr);
+        {
+            real64 timeElapsedMS = XtimeElapsedMS(
+                    args->pss->lastTime,
+                    endTime
+                    );
+            if (timeElapsedMS > (3 * 60 * 1000))
+            {
+                LogInfo("RETRYING after no writeable: len=%zu ptr=%zu takeIndex=%d\n",
+                        args->pss->len, args->pss->ptr, args->channel->takeIndex);
+
+                /* maybe writeable never came back, reset
+                   it to so we can resend the order */
+                args->pss->buffer = NULL;
+                args->pss->lastTime = endTime;
+                args->channel->takeIndex--; // resend the unresponsive order
+            }
+            else
+            {
+                LogInfo("WAITING FOR WRITEABLE: len=%zu ptr=%zu\n",
+                        args->pss->len, args->pss->ptr);
+            }
+        }
         /*
          * Only take a new message if pss isn't
          * already holding one.
          */
-        if (args->pss->buffer == NULL)
+        else
         {
             char *message =
                 (char *)ChannelTake(args->channel);
@@ -2396,6 +2419,7 @@ tradeThread(void *arg)
                 lws_callback_on_writable(args->wsi);
             }
             free(message);
+            args->pss->lastTime = endTime;
         }
 
         /*
@@ -2979,6 +3003,7 @@ main()
     pss.state = &state;
     pss.channel = &tradeChannel;
     pss.buffer = NULL;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &pss.lastTime);
     ccinfoTrade.userdata = (void *)&pss;
     struct lws *lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
     if (lwsTrade == NULL)
