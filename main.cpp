@@ -1270,6 +1270,7 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                 if (n < 0) {
                     lwsl_err("ERROR %d writing to ws socket\n", n);
                     free(pss->buffer);
+                    free(pss->message);
                     pss->buffer = NULL;
                     pss->message = NULL;
                     return -1; // Closes the connection cleanly
@@ -1284,6 +1285,7 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                 } else {
                     // Clean up buffer memory if sending is completely finished
                     free(pss->buffer);
+                    free(pss->message);
                     pss->buffer = NULL;
                     pss->message = NULL;
                     LogInfo("MESSAGE SENT; BUFFER CLEARED\n");
@@ -1337,7 +1339,9 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                 // Clean up memory if the client disconnects before transmission completes
                 if (pss && pss->buffer) {
                     free(pss->buffer);
+                    free(pss->message);
                     pss->buffer = NULL;
+                    pss->message= NULL;
                 }
                 break;
             }
@@ -2384,6 +2388,8 @@ tradeThread(void *arg)
                 /* maybe writeable never came back, reset
                    it to so we can resend the order */
                 unsigned char *lastMessage = args->pss->message;
+                free(args->pss->buffer);
+                free(args->pss->message);
                 args->pss->buffer = NULL;
                 args->pss->message = NULL;
                 args->pss->lastTime = endTime;
@@ -2413,11 +2419,11 @@ tradeThread(void *arg)
             if (message != NULL)
             {
                 size_t len = strlen(message);
-
+                args->pss->message = (unsigned char *)malloc(len + 1);
+                memcpy(args->pss->message, message, len + 1);
                 args->pss->buffer =
                     (unsigned char *)malloc(LWS_PRE + len);
 
-                memcpy(args->pss->message, message, len);
                 memcpy(
                     &args->pss->buffer[LWS_PRE],
                     message,
