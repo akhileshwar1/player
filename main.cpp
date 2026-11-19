@@ -231,7 +231,8 @@ typedef struct
 
 // Define a structure to hold your per-session (per-connection) data
 struct per_session_data__minimal {
-    unsigned char *buffer; // Pointer to the data to be sent
+    unsigned char *buffer; // Pointer to the data to be sent (json + format)
+    unsigned char *message; // actual json message
     size_t len;           // Total length of data remaining
     size_t ptr;           // Current read position in the buffer
     State *state;
@@ -1270,6 +1271,7 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                     lwsl_err("ERROR %d writing to ws socket\n", n);
                     free(pss->buffer);
                     pss->buffer = NULL;
+                    pss->message = NULL;
                     return -1; // Closes the connection cleanly
                 }
 
@@ -1283,6 +1285,7 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
                     // Clean up buffer memory if sending is completely finished
                     free(pss->buffer);
                     pss->buffer = NULL;
+                    pss->message = NULL;
                     LogInfo("MESSAGE SENT; BUFFER CLEARED\n");
                 }
                 break;
@@ -2380,9 +2383,16 @@ tradeThread(void *arg)
 
                 /* maybe writeable never came back, reset
                    it to so we can resend the order */
+                unsigned char *lastMessage = args->pss->message;
                 args->pss->buffer = NULL;
+                args->pss->message = NULL;
                 args->pss->lastTime = endTime;
-                args->channel->takeIndex--; // resend the unresponsive order
+                if (!ChannelPut(args->pss->channel, lastMessage))
+                {
+                    LogError("Couldn't reput; dropping subscribe message");
+                    free(lastMessage);
+                } // resend the unresponsive order
+                LogInfo("reput message %s\n", lastMessage);
             }
             else
             {
@@ -2407,6 +2417,7 @@ tradeThread(void *arg)
                 args->pss->buffer =
                     (unsigned char *)malloc(LWS_PRE + len);
 
+                memcpy(args->pss->message, message, len);
                 memcpy(
                     &args->pss->buffer[LWS_PRE],
                     message,
@@ -3003,6 +3014,7 @@ main()
     pss.state = &state;
     pss.channel = &tradeChannel;
     pss.buffer = NULL;
+    pss.message = NULL;
     clock_gettime(CLOCK_MONOTONIC_RAW, &pss.lastTime);
     ccinfoTrade.userdata = (void *)&pss;
     struct lws *lwsTrade = lws_client_connect_via_info(&ccinfoTrade);
