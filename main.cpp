@@ -2940,7 +2940,7 @@ main()
         timespec endTime;
         clock_gettime(CLOCK_MONOTONIC_RAW, &endTime);
         state.coinStates[i].lastTimeDashboard = endTime;
-        endTime.tv_sec -= 5 * 59 * 60; // so that we start quoting asap the first time.
+        endTime.tv_sec -= 5 * 57 * 60; // so that we start quoting asap the first time.
         state.coinStates[i].lastTime = endTime;
         state.coinStates[i].lastTimeExitRefresh = endTime;
     }
