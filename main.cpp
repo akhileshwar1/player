@@ -2387,7 +2387,9 @@ tradeThread(void *arg)
 
                 /* maybe writeable never came back, reset
                    it to so we can resend the order */
-                unsigned char *lastMessage = args->pss->message;
+                size_t len = strlen((char *)args->pss->message);
+                unsigned char *lastMessage = (unsigned char *)malloc(len + 1);;
+                memcpy(lastMessage, args->pss->message, len + 1);
                 free(args->pss->buffer);
                 free(args->pss->message);
                 args->pss->buffer = NULL;
