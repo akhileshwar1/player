@@ -1337,14 +1337,25 @@ CallbackBinanceTrade(struct lws *wsi, enum lws_callback_reasons reason,
         case LWS_CALLBACK_CLOSED:
             {
                 // Clean up memory if the client disconnects before transmission completes
-                if (pss && pss->buffer) {
+                if (pss) {
                     free(pss->buffer);
                     free(pss->message);
+
                     pss->buffer = NULL;
-                    pss->message= NULL;
-                }
+                    pss->message = NULL;
+                    pss->len = 0;
+                    pss->ptr = 0;
+                } 
                 break;
             }
+
+        case LWS_CALLBACK_CLIENT_CLOSED:
+            LogError("TRADE CLIENT CLOSED: wsi=%p pss=%p\n", wsi, pss);
+            break;
+
+        case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+            LogError("TRADE CONNECTION ERROR: wsi=%p\n", wsi);
+            break;
 
         default:
             break;
@@ -2416,7 +2427,7 @@ tradeThread(void *arg)
         {
             char *message =
                 (char *)ChannelTake(args->channel);
-            // LogInfo("Taken message is %s\n", message);
+            LogInfo("Taken message is %s\n", message);
 
             if (message != NULL)
             {
